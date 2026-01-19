@@ -597,11 +597,14 @@ def main():
             @st.cache_data(ttl=30)
             def get_sidebar_stats():
                 client = get_bq_client()
+                own_id = get_own_instagram_id()
                 stats = {"chats": 0, "comments": 0}
                 try:
-                    chat_stats = client.query("""
+                    chat_stats = client.query(f"""
                     SELECT COUNTIF(response_text IS NULL OR response_text = '') as offen
                     FROM `root-slate-454410-u0.instagram_messages.messages`
+                    WHERE sender_id != '{own_id}'
+                      AND sender_id NOT LIKE 'demo_%'
                     """).to_dataframe().iloc[0]
                     stats["chats"] = int(chat_stats['offen'])
                 except:
