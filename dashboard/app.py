@@ -145,16 +145,14 @@ st.markdown(f"""
 # BigQuery Client
 @st.cache_resource
 def get_bq_client():
+    from google.oauth2 import service_account
+    
     # Try to use Streamlit secrets (for cloud deployment)
-    try:
-        if "gcp_service_account" in st.secrets:
-            from google.oauth2 import service_account
-            credentials = service_account.Credentials.from_service_account_info(
-                st.secrets["gcp_service_account"]
-            )
-            return bigquery.Client(credentials=credentials, project="root-slate-454410-u0")
-    except:
-        pass
+    if "gcp_service_account" in st.secrets:
+        creds_dict = dict(st.secrets["gcp_service_account"])
+        credentials = service_account.Credentials.from_service_account_info(creds_dict)
+        return bigquery.Client(credentials=credentials, project="root-slate-454410-u0")
+    
     # Fallback to default credentials (local development)
     return bigquery.Client(project="root-slate-454410-u0")
 
