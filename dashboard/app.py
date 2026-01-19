@@ -600,11 +600,13 @@ def main():
                 own_id = get_own_instagram_id()
                 stats = {"chats": 0, "comments": 0}
                 try:
+                    # Count CONVERSATIONS with unanswered messages, not individual messages
                     chat_stats = client.query(f"""
-                    SELECT COUNTIF(response_text IS NULL OR response_text = '') as offen
+                    SELECT COUNT(DISTINCT sender_id) as offen
                     FROM `root-slate-454410-u0.instagram_messages.messages`
                     WHERE sender_id != '{own_id}'
                       AND sender_id NOT LIKE 'demo_%'
+                      AND (response_text IS NULL OR response_text = '')
                     """).to_dataframe().iloc[0]
                     stats["chats"] = int(chat_stats['offen'])
                 except:
