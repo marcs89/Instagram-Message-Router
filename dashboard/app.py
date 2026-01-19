@@ -67,8 +67,10 @@ def get_instagram_user_info(user_id: str) -> dict:
 
 @st.cache_data(ttl=3600)
 def get_cached_user_info(user_id: str) -> dict:
-    """Cached version of user info lookup"""
-    return get_instagram_user_info(user_id)
+    """Cached version of user info lookup - disabled until App Review"""
+    # API calls fail without App Review, skip them for now
+    # return get_instagram_user_info(user_id)
+    return {"username": "", "name": ""}
 
 def get_instagram_account_id():
     """Get Instagram Business Account ID from secrets or env"""
@@ -259,8 +261,9 @@ def get_bq_client():
 # Standard Tags
 DEFAULT_TAGS = ["Kundenservice", "Kooperationen", "Feedback"]
 
+@st.cache_data(ttl=60)  # Cache for 60 seconds
 def get_all_tags():
-    """Holt alle verwendeten Tags (Standard + Custom)"""
+    """Holt alle verwendeten Tags (Standard + Custom) - cached"""
     client = get_bq_client()
     query = """
     SELECT DISTINCT tags
@@ -590,30 +593,33 @@ def main():
             # Übersicht oben
             st.subheader("Offen")
             
-            client = get_bq_client()
+            # Cached stats function
+            @st.cache_data(ttl=30)
+            def get_sidebar_stats():
+                client = get_bq_client()
+                stats = {"chats": 0, "comments": 0}
+                try:
+                    chat_stats = client.query("""
+                    SELECT COUNTIF(response_text IS NULL OR response_text = '') as offen
+                    FROM `root-slate-454410-u0.instagram_messages.messages`
+                    """).to_dataframe().iloc[0]
+                    stats["chats"] = int(chat_stats['offen'])
+                except:
+                    pass
+                try:
+                    comment_stats = client.query("""
+                    SELECT COUNTIF((response_text IS NULL OR response_text = '') AND (is_liked IS NULL OR is_liked = FALSE)) as offen
+                    FROM `root-slate-454410-u0.instagram_messages.ad_comments`
+                    WHERE is_deleted = FALSE
+                    """).to_dataframe().iloc[0]
+                    stats["comments"] = int(comment_stats['offen'])
+                except:
+                    pass
+                return stats
             
-            # Chat Stats
-            try:
-                chat_stats = client.query("""
-                SELECT COUNTIF(response_text IS NULL OR response_text = '') as offen
-                FROM `root-slate-454410-u0.instagram_messages.messages`
-                """).to_dataframe().iloc[0]
-                
-                st.markdown(f"**Chats:** {int(chat_stats['offen'])}")
-            except:
-                pass
-            
-            # Ad-Kommentare Stats
-            try:
-                comment_stats = client.query("""
-                SELECT COUNTIF((response_text IS NULL OR response_text = '') AND (is_liked IS NULL OR is_liked = FALSE)) as offen
-                FROM `root-slate-454410-u0.instagram_messages.ad_comments`
-                WHERE is_deleted = FALSE
-                """).to_dataframe().iloc[0]
-                
-                st.markdown(f"**Ad-Kommentare:** {int(comment_stats['offen'])}")
-            except:
-                pass
+            sidebar_stats = get_sidebar_stats()
+            st.markdown(f"**Chats:** {sidebar_stats['chats']}")
+            st.markdown(f"**Ad-Kommentare:** {sidebar_stats['comments']}")
             
             st.divider()
             
