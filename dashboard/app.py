@@ -119,15 +119,21 @@ st.set_page_config(
 )
 
 # === LOGIN ===
+def get_user_passwords():
+    """Holt User-Passwörter aus Secrets"""
+    passwords = {}
+    for kuerzel in TEAM_MEMBERS.keys():
+        # Format in Secrets: USER_AS = "passwort"
+        pwd = st.secrets.get(f"USER_{kuerzel}", "")
+        if pwd:
+            passwords[kuerzel] = pwd
+    return passwords
+
 def check_password():
-    """Simple password protection using query params for persistence"""
+    """Multi-user password protection"""
     
-    # Check if already authenticated via query param
-    if st.query_params.get("auth") == "ok":
-        return True
-    
-    # Check session state
-    if st.session_state.get("authenticated", False):
+    # Check if already authenticated
+    if st.session_state.get("authenticated", False) and st.session_state.get("user_kuerzel"):
         return True
     
     st.markdown("""
@@ -142,10 +148,23 @@ def check_password():
         password = st.text_input("Passwort", type="password", key="pwd_input")
         
         if st.button("Login", type="primary", use_container_width=True):
-            correct_password = st.secrets.get("APP_PASSWORD", "lilimaus2024")
-            if password == correct_password:
+            user_passwords = get_user_passwords()
+            
+            # Prüfe ob Passwort zu einem User gehört
+            authenticated_user = None
+            for kuerzel, pwd in user_passwords.items():
+                if password == pwd:
+                    authenticated_user = kuerzel
+                    break
+            
+            # Fallback: Altes gemeinsames Passwort (für Übergang)
+            if not authenticated_user and password == st.secrets.get("APP_PASSWORD", ""):
+                authenticated_user = "MS"  # Default User
+            
+            if authenticated_user:
                 st.session_state["authenticated"] = True
-                st.query_params["auth"] = "ok"
+                st.session_state["user_kuerzel"] = authenticated_user
+                st.session_state["user_name"] = TEAM_MEMBERS.get(authenticated_user, authenticated_user)
                 st.rerun()
             else:
                 st.error("Falsches Passwort")
@@ -260,6 +279,15 @@ def get_bq_client():
 
 # Standard Tags
 DEFAULT_TAGS = ["Kundenservice", "Kooperationen", "Feedback"]
+
+# Team-Mitglieder (Kürzel -> Name)
+TEAM_MEMBERS = {
+    "AS": "Anni",
+    "MS": "Marc",
+    "SM": "Sina",
+    "JD": "Jessy",
+    "SG": "Sinem"
+}
 
 @st.cache_data(ttl=60)  # Cache for 60 seconds
 def get_all_tags():
@@ -489,13 +517,50 @@ def render_chat_view(sender_id: str, auto_refresh_chat: bool = False):
     
     st.divider()
     
-    # Chat-Verlauf
-    for _, msg in messages.iterrows():
+    # Chat-Verlauf (neueste zuerst)
+    # Pagination State
+    page_key = f"chat_page_{sender_id}"
+    if page_key not in st.session_state:
+        st.session_state[page_key] = 1
+    
+    messages_per_page = 10
+    total_messages = len(messages)
+    current_page = st.session_state[page_key]
+    
+    # Nachrichten umkehren (neueste zuerst)
+    messages_reversed = messages.iloc[::-1]
+    
+    # Nur die anzuzeigenden Nachrichten
+    start_idx = 0
+    end_idx = current_page * messages_per_page
+    messages_to_show = messages_reversed.iloc[start_idx:end_idx]
+    
+    # "Mehr laden" Button (falls es mehr gibt)
+    if end_idx < total_messages:
+        remaining = total_messages - end_idx
+        if st.button(f"📜 Ältere Nachrichten laden ({remaining} weitere)", key=f"load_more_{sender_id}"):
+            st.session_state[page_key] += 1
+            st.rerun()
+    
+    # Nachrichten anzeigen (neueste oben)
+    for _, msg in messages_to_show.iterrows():
         received_at = msg.get('received_at', '')
         try:
             time_str = pd.to_datetime(received_at).strftime('%d.%m. %H:%M')
         except:
             time_str = ""
+        
+        # Antwort zuerst (da umgekehrte Reihenfolge)
+        response = msg.get('response_text', '')
+        if response:
+            responded_by = msg.get('responded_by', '')
+            user_badge = f"<span style='background:#eee;padding:2px 6px;border-radius:3px;font-size:11px;margin-right:5px;'>{responded_by}</span>" if responded_by else ""
+            st.markdown(f"""
+            <div class="message-outgoing">
+                <div>{response}</div>
+                <div class="message-time">{user_badge}✓ Gesendet</div>
+            </div>
+            """, unsafe_allow_html=True)
         
         # Eingehende Nachricht
         message_text = msg.get('message_text', '')
@@ -505,16 +570,6 @@ def render_chat_view(sender_id: str, auto_refresh_chat: bool = False):
             <div class="message-time">{time_str}</div>
         </div>
         """, unsafe_allow_html=True)
-        
-        # Antwort
-        response = msg.get('response_text', '')
-        if response:
-            st.markdown(f"""
-            <div class="message-outgoing">
-                <div>{response}</div>
-                <div class="message-time">✓ Gesendet</div>
-            </div>
-            """, unsafe_allow_html=True)
     
     st.divider()
     
@@ -557,12 +612,14 @@ def render_chat_view(sender_id: str, auto_refresh_chat: bool = False):
                 success, msg = send_instagram_message(sender_id, reply_text)
                 
                 if success:
-                    # Speichere in DB
+                    # Speichere in DB mit User-Kürzel
+                    user_kuerzel = st.session_state.get('user_kuerzel', 'XX')
                     update_message(last_msg['message_id'], {
                         "response_text": reply_text,
-                        "responded_at": datetime.utcnow().isoformat()
+                        "responded_at": datetime.utcnow().isoformat(),
+                        "responded_by": user_kuerzel
                     })
-                    st.success("✅ Gesendet!")
+                    st.success(f"✅ Gesendet ({user_kuerzel})")
                     if reply_key in st.session_state:
                         del st.session_state[reply_key]
                     st.rerun()
@@ -572,22 +629,41 @@ def render_chat_view(sender_id: str, auto_refresh_chat: bool = False):
     with col2:
         if st.button("✅ Als beantwortet markieren", key=f"done_{sender_id}"):
             # Leere Antwort setzen um als "beantwortet" zu markieren
+            user_kuerzel = st.session_state.get('user_kuerzel', 'XX')
             update_message(last_msg['message_id'], {
                 "response_text": "[Extern beantwortet]",
-                "responded_at": datetime.utcnow().isoformat()
+                "responded_at": datetime.utcnow().isoformat(),
+                "responded_by": user_kuerzel
             })
-            st.success("✅ Markiert!")
+            st.success(f"✅ Markiert ({user_kuerzel})")
             st.rerun()
 
 
 def main():
     # Header
-    st.markdown("""
-    <div style="text-align: center; padding: 20px 0;">
-        <img src="https://lilimaus.de/cdn/shop/files/Lilimaus_Logo_241212.png?v=1743081255" height="50">
-        <p style="color: #666; margin-top: 10px;">Instagram Inbox</p>
-    </div>
-    """, unsafe_allow_html=True)
+    # Kompakter Header mit eingeloggtem User
+    col_logo, col_spacer, col_user = st.columns([2, 4, 2])
+    with col_logo:
+        st.markdown("""
+        <div style="display: flex; align-items: center; gap: 10px;">
+            <img src="https://lilimaus.de/cdn/shop/files/Lilimaus_Logo_241212.png?v=1743081255" height="30">
+            <span style="color: #666; font-size: 14px;">Inbox</span>
+        </div>
+        """, unsafe_allow_html=True)
+    with col_user:
+        # Zeige eingeloggten User
+        user_name = st.session_state.get("user_name", "User")
+        user_kuerzel = st.session_state.get("user_kuerzel", "XX")
+        
+        col_name, col_logout = st.columns([3, 1])
+        with col_name:
+            st.markdown(f"**{user_name}** ({user_kuerzel})")
+        with col_logout:
+            if st.button("🚪", help="Logout", key="logout_btn"):
+                st.session_state["authenticated"] = False
+                st.session_state["user_kuerzel"] = None
+                st.session_state["user_name"] = None
+                st.rerun()
     
     # Tabs
     tab1, tab2, tab3 = st.tabs(["📬 Inbox", "📢 Ad-Kommentare", "🧪 Test"])
