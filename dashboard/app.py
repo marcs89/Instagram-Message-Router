@@ -101,9 +101,12 @@ def check_password():
     
     def password_entered():
         """Checks whether password is correct"""
-        if st.session_state["password"] == st.secrets.get("APP_PASSWORD", "lilimaus2024"):
+        entered_password = st.session_state.get("password", "")
+        correct_password = st.secrets.get("APP_PASSWORD", "lilimaus2024")
+        if entered_password == correct_password:
             st.session_state["authenticated"] = True
-            del st.session_state["password"]
+            if "password" in st.session_state:
+                del st.session_state["password"]
         else:
             st.session_state["authenticated"] = False
 
