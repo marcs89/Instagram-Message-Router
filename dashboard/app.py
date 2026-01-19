@@ -111,25 +111,16 @@ st.set_page_config(
 
 # === LOGIN ===
 def check_password():
-    """Simple password protection"""
+    """Simple password protection using query params for persistence"""
     
-    # Already authenticated
+    # Check if already authenticated via query param
+    if st.query_params.get("auth") == "ok":
+        return True
+    
+    # Check session state
     if st.session_state.get("authenticated", False):
         return True
     
-    def password_entered():
-        """Checks whether password is correct"""
-        entered_password = st.session_state.get("password", "")
-        correct_password = st.secrets.get("APP_PASSWORD", "lilimaus2024")
-        if entered_password == correct_password:
-            st.session_state["authenticated"] = True
-            st.session_state["login_attempted"] = False
-            if "password" in st.session_state:
-                del st.session_state["password"]
-        else:
-            st.session_state["authenticated"] = False
-            st.session_state["login_attempted"] = True
-
     st.markdown("""
     <div style="text-align: center; padding: 50px 0;">
         <img src="https://lilimaus.de/cdn/shop/files/Lilimaus_Logo_241212.png?v=1743081255" height="60">
@@ -139,15 +130,16 @@ def check_password():
     
     col1, col2, col3 = st.columns([1, 1, 1])
     with col2:
-        st.text_input(
-            "Passwort", 
-            type="password", 
-            on_change=password_entered, 
-            key="password"
-        )
-        # Only show error if user actually tried to login
-        if st.session_state.get("login_attempted", False):
-            st.error("Falsches Passwort")
+        password = st.text_input("Passwort", type="password", key="pwd_input")
+        
+        if st.button("Login", type="primary", use_container_width=True):
+            correct_password = st.secrets.get("APP_PASSWORD", "lilimaus2024")
+            if password == correct_password:
+                st.session_state["authenticated"] = True
+                st.query_params["auth"] = "ok"
+                st.rerun()
+            else:
+                st.error("Falsches Passwort")
     
     return False
 
