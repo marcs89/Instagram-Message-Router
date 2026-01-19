@@ -34,60 +34,47 @@ def verify_signature(payload: bytes, signature: str) -> bool:
     return hmac.compare_digest(f"sha256={expected_signature}", signature)
 
 
-def categorize_message(message_text: str) -> dict:
+def auto_tag_message(message_text: str) -> dict:
     """
-    Kategorisiert eine Nachricht basierend auf Keywords.
-    Später: KI-basierte Kategorisierung hinzufügen.
+    Vergibt automatisch Tags basierend auf Keywords.
+    Tags: Kundenservice, Feedback, Kooperationen
     """
     text_lower = message_text.lower() if message_text else ""
     
-    categories = {
-        "groessenberatung": [
-            "größe", "groesse", "welche größe", "passt mir", "maße", 
-            "cm", "measurements", "size", "sizing"
-        ],
-        "back_in_stock": [
-            "wieder verfügbar", "ausverkauft", "wann wieder", "back in stock",
-            "nicht verfügbar", "sold out", "restock"
-        ],
-        "kooperation": [
+    # Keywords für jeden Tag
+    tag_keywords = {
+        "Kooperationen": [
             "zusammenarbeit", "kooperation", "influencer", "pr", "collab",
-            "partnership", "werbung", "promotion"
+            "partnership", "werbung", "promotion", "creator", "ugc",
+            "ambassador", "botschafter"
         ],
-        "reklamation": [
-            "kaputt", "defekt", "rückgabe", "problem", "reklamation",
-            "beschädigt", "falsch", "fehler", "broken", "damaged"
-        ],
-        "feedback_positiv": [
+        "Feedback": [
             "toll", "super", "danke", "liebe", "perfekt", "amazing",
-            "love", "great", "awesome", "❤️", "🔥", "😍", "👍"
-        ],
-        "bestellung": [
-            "bestellung", "order", "tracking", "versand", "lieferung",
-            "wo ist mein", "wann kommt"
+            "love", "great", "awesome", "wunderschön", "begeistert",
+            "empfehlen", "zufrieden", "glücklich", "happy",
+            "❤️", "🔥", "😍", "👍", "💕", "🥰", "😊"
         ]
     }
     
-    detected_categories = []
-    for category, keywords in categories.items():
+    detected_tags = []
+    
+    # Prüfe auf Kooperationen und Feedback
+    for tag, keywords in tag_keywords.items():
         for keyword in keywords:
             if keyword in text_lower:
-                detected_categories.append(category)
+                detected_tags.append(tag)
                 break
     
-    # Priorität bestimmen
-    high_priority = ["reklamation", "bestellung"]
-    priority = "high" if any(cat in high_priority for cat in detected_categories) else "normal"
+    # Wenn weder Kooperation noch Feedback -> Kundenservice
+    if not detected_tags:
+        detected_tags = ["Kundenservice"]
     
-    # Falls keine Kategorie erkannt
-    if not detected_categories:
-        detected_categories = ["unkategorisiert"]
-        priority = "normal"
+    # Priorität: Kooperationen = normal, Kundenservice = normal, Feedback = low
+    priority = "normal"
     
     return {
-        "categories": detected_categories,
-        "priority": priority,
-        "primary_category": detected_categories[0]
+        "tags": ",".join(detected_tags),
+        "priority": priority
     }
 
 
@@ -111,14 +98,13 @@ def process_message(messaging_event: dict) -> dict:
     # Story Mention/Reply erkennen
     is_story_reply = "story" in message.get("reply_to", {})
     
-    # Kategorisieren
-    categorization = categorize_message(message_text)
+    # Auto-Tagging
+    tagging = auto_tag_message(message_text)
     
-    # Wenn Story Reply, Kategorie überschreiben
+    # Wenn Story Reply, Tag auf Feedback setzen
     if is_story_reply:
-        categorization["categories"] = ["story_reaction"]
-        categorization["primary_category"] = "story_reaction"
-        categorization["priority"] = "low"
+        tagging["tags"] = "Feedback"
+        tagging["priority"] = "low"
     
     processed = {
         "message_id": message_id,
@@ -130,11 +116,9 @@ def process_message(messaging_event: dict) -> dict:
         "has_attachments": has_attachments,
         "attachment_types": attachment_types,
         "is_story_reply": is_story_reply,
-        "categories": categorization["categories"],
-        "primary_category": categorization["primary_category"],
-        "priority": categorization["priority"],
-        "status": "new",
-        "assigned_to": None
+        "tags": tagging["tags"],
+        "priority": tagging["priority"],
+        "status": "new"
     }
     
     return processed
@@ -270,9 +254,7 @@ def save_to_bigquery(message_data: dict):
         sender_id = escape(message_data.get("sender_id"))
         recipient_id = escape(message_data.get("recipient_id"))
         text = escape(message_data.get("message_text"))
-        
-        cats = json.dumps(message_data.get("categories", []))
-        p_cat = escape(message_data.get("primary_category", "unkategorisiert"))
+        tags = escape(message_data.get("tags", "Kundenservice"))
         prio = escape(message_data.get("priority", "normal"))
         
         ts = int(message_data.get("timestamp", 0) or 0)
@@ -282,7 +264,7 @@ def save_to_bigquery(message_data: dict):
         INSERT INTO `{table_id}`
         (message_id, sender_id, recipient_id, timestamp, received_at, 
          message_text, has_attachments, attachment_types, is_story_reply, 
-         categories, primary_category, priority, status)
+         tags, priority, status)
         VALUES (
             '{msg_id}',
             '{sender_id}',
@@ -293,8 +275,7 @@ def save_to_bigquery(message_data: dict):
             {str(message_data.get("has_attachments", False)).upper()},
             '{json.dumps(message_data.get("attachment_types", []))}',
             {str(message_data.get("is_story_reply", False)).upper()},
-            '{cats}',
-            '{p_cat}',
+            '{tags}',
             '{prio}',
             'new'
         )
@@ -453,7 +434,7 @@ if __name__ == "__main__":
         ]
         
         for msg in test_messages:
-            result = categorize_message(msg)
+            result = auto_tag_message(msg)
             print(f"'{msg[:40]}...' -> {result}")
     else:
         # Run Flask server
