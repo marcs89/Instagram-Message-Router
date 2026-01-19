@@ -36,12 +36,16 @@ def get_page_access_token():
 
 def get_instagram_user_info(user_id: str) -> dict:
     """Fetch Instagram user info (username, name) via Graph API"""
+    # Skip API call for demo users
+    if user_id.startswith("demo_"):
+        return {"username": user_id, "name": ""}
+    
     token = get_page_access_token()
     if not token:
-        return {"username": f"User {user_id[:8]}...", "name": ""}
+        return {"username": "", "name": ""}
     
     try:
-        url = f"https://graph.facebook.com/v18.0/{user_id}"
+        url = f"https://graph.facebook.com/v21.0/{user_id}"
         params = {
             "fields": "username,name",
             "access_token": token
@@ -49,14 +53,17 @@ def get_instagram_user_info(user_id: str) -> dict:
         response = requests.get(url, params=params, timeout=5)
         if response.status_code == 200:
             data = response.json()
-            return {
-                "username": data.get("username", f"User {user_id[:8]}..."),
-                "name": data.get("name", "")
-            }
+            # Check if it's an error response
+            if "error" not in data:
+                return {
+                    "username": data.get("username", ""),
+                    "name": data.get("name", "")
+                }
     except Exception as e:
-        print(f"Error fetching user info: {e}")
+        pass
     
-    return {"username": f"User {user_id[:8]}...", "name": ""}
+    # Return empty - will fall back to sender_name from DB or ID
+    return {"username": "", "name": ""}
 
 @st.cache_data(ttl=3600)
 def get_cached_user_info(user_id: str) -> dict:
@@ -320,11 +327,21 @@ Aktuelle Nachricht:
         return f"Hey! Danke für deine Nachricht 😊"
 
 
+def get_own_instagram_id():
+    """Get our own Instagram Account ID to filter out"""
+    return st.secrets.get("INSTAGRAM_ACCOUNT_ID", os.getenv("INSTAGRAM_ACCOUNT_ID", "17841462069085392"))
+
 def load_conversations(filter_type: str = "all", filter_tags: list = None):
     """Lädt Konversationen mit Filtern"""
     client = get_bq_client()
     
-    where_clauses = ["1=1"]
+    own_id = get_own_instagram_id()
+    
+    # Filter out our own account and demo users
+    where_clauses = [
+        f"sender_id != '{own_id}'",
+        "sender_id NOT LIKE 'demo_%'"
+    ]
     
     if filter_type == "unbeantwortet":
         where_clauses.append("(response_text IS NULL OR response_text = '')")
@@ -632,9 +649,12 @@ def main():
             else:
                 for _, conv in conversations.iterrows():
                     sender_id = conv['sender_id']
-                    # Try to get username from Instagram API
+                    # Try to get username - API only works for testers without App Review
                     user_info = get_cached_user_info(sender_id)
-                    sender_name = user_info.get('username', '') or conv.get('sender_name', '') or f"User {sender_id[:8]}..."
+                    username = user_info.get('username', '')
+                    db_name = conv.get('sender_name', '')
+                    # Use: API username > DB name > shortened ID
+                    sender_name = username or db_name or f"User {sender_id[:10]}..."
                     has_unanswered = conv.get('has_unanswered', 0)
                     last_message = conv.get('last_message', '')[:50] + "..." if conv.get('last_message') else ""
                     tags = conv.get('tags', '') or ''
