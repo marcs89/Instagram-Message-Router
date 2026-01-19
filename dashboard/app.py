@@ -331,8 +331,9 @@ def get_own_instagram_id():
     """Get our own Instagram Account ID to filter out"""
     return st.secrets.get("INSTAGRAM_ACCOUNT_ID", os.getenv("INSTAGRAM_ACCOUNT_ID", "17841462069085392"))
 
-def load_conversations(filter_type: str = "all", filter_tags: list = None):
-    """Lädt Konversationen mit Filtern"""
+@st.cache_data(ttl=30)  # Cache for 30 seconds
+def load_conversations(filter_type: str = "all", filter_tags_str: str = ""):
+    """Lädt Konversationen mit Filtern (cached)"""
     client = get_bq_client()
     
     own_id = get_own_instagram_id()
@@ -346,7 +347,8 @@ def load_conversations(filter_type: str = "all", filter_tags: list = None):
     if filter_type == "unbeantwortet":
         where_clauses.append("(response_text IS NULL OR response_text = '')")
     
-    if filter_tags and len(filter_tags) > 0:
+    if filter_tags_str:
+        filter_tags = filter_tags_str.split(",")
         tag_conditions = []
         for tag in filter_tags:
             tag_conditions.append(f"tags LIKE '%{tag}%'")
@@ -378,8 +380,9 @@ def load_conversations(filter_type: str = "all", filter_tags: list = None):
         return pd.DataFrame()
 
 
+@st.cache_data(ttl=15)  # Cache for 15 seconds
 def load_chat_history(sender_id: str):
-    """Lädt den Chat-Verlauf für einen Sender"""
+    """Lädt den Chat-Verlauf für einen Sender (cached)"""
     client = get_bq_client()
     query = f"""
     SELECT *
@@ -394,7 +397,7 @@ def load_chat_history(sender_id: str):
 
 
 def update_message(message_id: str, updates: dict):
-    """Aktualisiert eine Nachricht"""
+    """Aktualisiert eine Nachricht und leert den Cache"""
     client = get_bq_client()
     
     set_clauses = []
@@ -415,6 +418,9 @@ def update_message(message_id: str, updates: dict):
     
     try:
         client.query(query).result()
+        # Clear cache after update
+        load_conversations.clear()
+        load_chat_history.clear()
         return True
     except Exception as e:
         st.error(f"Fehler: {e}")
@@ -636,12 +642,19 @@ def main():
         col_inbox, col_chat = st.columns([1, 2])
         
         with col_inbox:
-            st.subheader("Chats")
+            col_title, col_refresh = st.columns([3, 1])
+            with col_title:
+                st.subheader("Chats")
+            with col_refresh:
+                if st.button("🔄", help="Aktualisieren"):
+                    load_conversations.clear()
+                    load_chat_history.clear()
+                    st.rerun()
             
-            # Konversationen laden
+            # Konversationen laden (filter_tags als comma-separated string für caching)
             conversations = load_conversations(
                 filter_type="unbeantwortet" if filter_type == "Unbeantwortet" else "all",
-                filter_tags=filter_tags if filter_tags else None
+                filter_tags_str=",".join(filter_tags) if filter_tags else ""
             )
             
             if conversations.empty:
