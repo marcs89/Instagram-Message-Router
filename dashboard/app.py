@@ -63,6 +63,10 @@ def get_cached_user_info(user_id: str) -> dict:
     """Cached version of user info lookup"""
     return get_instagram_user_info(user_id)
 
+def get_instagram_account_id():
+    """Get Instagram Business Account ID from secrets or env"""
+    return st.secrets.get("INSTAGRAM_ACCOUNT_ID", os.getenv("INSTAGRAM_ACCOUNT_ID", ""))
+
 def send_instagram_message(recipient_id: str, message_text: str) -> tuple[bool, str]:
     """Send a message via Instagram Graph API"""
     token = get_page_access_token()
@@ -70,21 +74,31 @@ def send_instagram_message(recipient_id: str, message_text: str) -> tuple[bool, 
         return False, "Kein Page Access Token konfiguriert"
     
     try:
-        # Instagram uses Page-scoped user IDs (IGSID)
-        url = f"https://graph.facebook.com/v18.0/me/messages"
+        # Instagram uses the Page ID or Instagram Account ID for sending
+        # The recipient_id is the Instagram-scoped User ID (IGSID)
+        url = f"https://graph.facebook.com/v21.0/me/messages"
+        
         payload = {
             "recipient": {"id": recipient_id},
-            "message": {"text": message_text},
-            "access_token": token
+            "message": {"text": message_text}
         }
-        response = requests.post(url, json=payload, timeout=10)
+        
+        params = {"access_token": token}
+        
+        response = requests.post(url, json=payload, params=params, timeout=10)
         
         if response.status_code == 200:
             return True, "Nachricht gesendet"
         else:
             error_data = response.json()
             error_msg = error_data.get("error", {}).get("message", "Unbekannter Fehler")
-            return False, f"API Fehler: {error_msg}"
+            error_code = error_data.get("error", {}).get("code", "")
+            
+            # Debug info
+            print(f"Instagram API Error: {error_code} - {error_msg}")
+            print(f"Recipient ID: {recipient_id}")
+            
+            return False, f"API Fehler: ({error_code}) {error_msg}"
     except Exception as e:
         return False, f"Fehler: {str(e)}"
 
