@@ -430,7 +430,7 @@ def update_message(message_id: str, updates: dict):
         return False
 
 
-def render_chat_view(sender_id: str):
+def render_chat_view(sender_id: str, auto_refresh_chat: bool = False):
     """Rendert die Chat-Ansicht"""
     messages = load_chat_history(sender_id)
     
@@ -443,8 +443,14 @@ def render_chat_view(sender_id: str):
     sender_name = user_info.get('username', '') or messages.iloc[0].get('sender_name', '') or 'Unbekannt'
     last_msg = messages.iloc[-1]
     
-    # Header
-    st.subheader(f"💬 {sender_name}")
+    # Header with optional auto-refresh for chat messages only
+    col_header, col_refresh = st.columns([4, 1])
+    with col_header:
+        st.subheader(f"💬 {sender_name}")
+    with col_refresh:
+        if st.button("🔄", key=f"refresh_chat_{sender_id}", help="Chat aktualisieren"):
+            load_chat_history.clear()
+            st.rerun()
     
     # Tags anzeigen & bearbeiten
     current_tags_str = last_msg.get('tags', '') or ''
@@ -625,8 +631,6 @@ def main():
             sidebar_stats = get_sidebar_stats()
             st.markdown(f"**Chats:** {sidebar_stats['chats']}")
             st.markdown(f"**Ad-Kommentare:** {sidebar_stats['comments']}")
-            
-            st.divider()
             
             # Filter
             st.subheader("🔍 Filter")
