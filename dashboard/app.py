@@ -113,19 +113,22 @@ st.set_page_config(
 def check_password():
     """Simple password protection"""
     
+    # Already authenticated
+    if st.session_state.get("authenticated", False):
+        return True
+    
     def password_entered():
         """Checks whether password is correct"""
         entered_password = st.session_state.get("password", "")
         correct_password = st.secrets.get("APP_PASSWORD", "lilimaus2024")
         if entered_password == correct_password:
             st.session_state["authenticated"] = True
+            st.session_state["login_attempted"] = False
             if "password" in st.session_state:
                 del st.session_state["password"]
         else:
             st.session_state["authenticated"] = False
-
-    if st.session_state.get("authenticated", False):
-        return True
+            st.session_state["login_attempted"] = True
 
     st.markdown("""
     <div style="text-align: center; padding: 50px 0;">
@@ -142,7 +145,8 @@ def check_password():
             on_change=password_entered, 
             key="password"
         )
-        if "authenticated" in st.session_state and not st.session_state["authenticated"]:
+        # Only show error if user actually tried to login
+        if st.session_state.get("login_attempted", False):
             st.error("Falsches Passwort")
     
     return False
