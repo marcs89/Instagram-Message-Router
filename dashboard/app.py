@@ -9,6 +9,7 @@ from google.cloud import bigquery
 from datetime import datetime, timedelta
 import json
 import os
+import requests
 from pathlib import Path
 from dotenv import load_dotenv
 from google import genai
@@ -27,6 +28,65 @@ for env_path in possible_env_paths:
 
 if not os.getenv("GEMINI_API_KEY"):
     os.environ["GEMINI_API_KEY"] = "AIzaSyBCZxnGUJwFJ6j3f4brhV8XrLLUYV9vjHg"
+
+# Instagram API Functions
+def get_page_access_token():
+    """Get Page Access Token from secrets or env"""
+    return st.secrets.get("PAGE_ACCESS_TOKEN", os.getenv("PAGE_ACCESS_TOKEN", ""))
+
+def get_instagram_user_info(user_id: str) -> dict:
+    """Fetch Instagram user info (username, name) via Graph API"""
+    token = get_page_access_token()
+    if not token:
+        return {"username": f"User {user_id[:8]}...", "name": ""}
+    
+    try:
+        url = f"https://graph.facebook.com/v18.0/{user_id}"
+        params = {
+            "fields": "username,name",
+            "access_token": token
+        }
+        response = requests.get(url, params=params, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            return {
+                "username": data.get("username", f"User {user_id[:8]}..."),
+                "name": data.get("name", "")
+            }
+    except Exception as e:
+        print(f"Error fetching user info: {e}")
+    
+    return {"username": f"User {user_id[:8]}...", "name": ""}
+
+@st.cache_data(ttl=3600)
+def get_cached_user_info(user_id: str) -> dict:
+    """Cached version of user info lookup"""
+    return get_instagram_user_info(user_id)
+
+def send_instagram_message(recipient_id: str, message_text: str) -> tuple[bool, str]:
+    """Send a message via Instagram Graph API"""
+    token = get_page_access_token()
+    if not token:
+        return False, "Kein Page Access Token konfiguriert"
+    
+    try:
+        # Instagram uses Page-scoped user IDs (IGSID)
+        url = f"https://graph.facebook.com/v18.0/me/messages"
+        payload = {
+            "recipient": {"id": recipient_id},
+            "message": {"text": message_text},
+            "access_token": token
+        }
+        response = requests.post(url, json=payload, timeout=10)
+        
+        if response.status_code == 200:
+            return True, "Nachricht gesendet"
+        else:
+            error_data = response.json()
+            error_msg = error_data.get("error", {}).get("message", "Unbekannter Fehler")
+            return False, f"API Fehler: {error_msg}"
+    except Exception as e:
+        return False, f"Fehler: {str(e)}"
 
 # Page Config
 st.set_page_config(
@@ -148,10 +208,30 @@ def get_bq_client():
     from google.oauth2 import service_account
     
     # Try to use Streamlit secrets (for cloud deployment)
-    if "gcp_service_account" in st.secrets:
-        creds_dict = dict(st.secrets["gcp_service_account"])
-        credentials = service_account.Credentials.from_service_account_info(creds_dict)
-        return bigquery.Client(credentials=credentials, project="root-slate-454410-u0")
+    try:
+        if "GCP_SERVICE_ACCOUNT_JSON" in st.secrets:
+            # JSON string format
+            creds_dict = json.loads(st.secrets["GCP_SERVICE_ACCOUNT_JSON"])
+            credentials = service_account.Credentials.from_service_account_info(creds_dict)
+            return bigquery.Client(credentials=credentials, project="root-slate-454410-u0")
+        elif "gcp_service_account" in st.secrets:
+            # TOML section format
+            creds_dict = {
+                "type": st.secrets["gcp_service_account"]["type"],
+                "project_id": st.secrets["gcp_service_account"]["project_id"],
+                "private_key_id": st.secrets["gcp_service_account"]["private_key_id"],
+                "private_key": st.secrets["gcp_service_account"]["private_key"],
+                "client_email": st.secrets["gcp_service_account"]["client_email"],
+                "client_id": st.secrets["gcp_service_account"]["client_id"],
+                "auth_uri": st.secrets["gcp_service_account"]["auth_uri"],
+                "token_uri": st.secrets["gcp_service_account"]["token_uri"],
+                "auth_provider_x509_cert_url": st.secrets["gcp_service_account"]["auth_provider_x509_cert_url"],
+                "client_x509_cert_url": st.secrets["gcp_service_account"]["client_x509_cert_url"],
+            }
+            credentials = service_account.Credentials.from_service_account_info(creds_dict)
+            return bigquery.Client(credentials=credentials, project="root-slate-454410-u0")
+    except Exception as e:
+        st.error(f"BigQuery Auth Error: {e}")
     
     # Fallback to default credentials (local development)
     return bigquery.Client(project="root-slate-454410-u0")
@@ -319,7 +399,9 @@ def render_chat_view(sender_id: str):
         st.info("Keine Nachrichten")
         return
     
-    sender_name = messages.iloc[0].get('sender_name', 'Unbekannt') or 'Unbekannt'
+    # Get username from Instagram API
+    user_info = get_cached_user_info(sender_id)
+    sender_name = user_info.get('username', '') or messages.iloc[0].get('sender_name', '') or 'Unbekannt'
     last_msg = messages.iloc[-1]
     
     # Header
@@ -426,14 +508,21 @@ def render_chat_view(sender_id: str):
     with col1:
         if st.button("📤 Senden", type="primary", key=f"send_{sender_id}"):
             if reply_text:
-                update_message(last_msg['message_id'], {
-                    "response_text": reply_text,
-                    "responded_at": datetime.utcnow().isoformat()
-                })
-                st.success("✅ Gesendet!")
-                if reply_key in st.session_state:
-                    del st.session_state[reply_key]
-                st.rerun()
+                # Sende an Instagram
+                success, msg = send_instagram_message(sender_id, reply_text)
+                
+                if success:
+                    # Speichere in DB
+                    update_message(last_msg['message_id'], {
+                        "response_text": reply_text,
+                        "responded_at": datetime.utcnow().isoformat()
+                    })
+                    st.success("✅ Gesendet!")
+                    if reply_key in st.session_state:
+                        del st.session_state[reply_key]
+                    st.rerun()
+                else:
+                    st.error(f"❌ {msg}")
     
     with col2:
         if st.button("✅ Als beantwortet markieren", key=f"done_{sender_id}"):
@@ -530,7 +619,9 @@ def main():
             else:
                 for _, conv in conversations.iterrows():
                     sender_id = conv['sender_id']
-                    sender_name = conv.get('sender_name', '') or f"User {sender_id[:8]}..."
+                    # Try to get username from Instagram API
+                    user_info = get_cached_user_info(sender_id)
+                    sender_name = user_info.get('username', '') or conv.get('sender_name', '') or f"User {sender_id[:8]}..."
                     has_unanswered = conv.get('has_unanswered', 0)
                     last_message = conv.get('last_message', '')[:50] + "..." if conv.get('last_message') else ""
                     tags = conv.get('tags', '') or ''
