@@ -1,0 +1,21 @@
+# Meta App Credentials
+META_APP_ID=843827511984986
+META_APP_SECRET=fb7c65de8d132aeb367c11a15970b3e3
+
+# Facebook Page
+FACEBOOK_PAGE_ID=700567503143360
+PAGE_ACCESS_TOKEN=EAALZCdOcag1oBQePmfWIgKZCOetPbgpUblNa9UJdxxGUEFZB2LY8LOJk3i7quWPpsZCvDSeXSdyQgZB41Cpin0s5JeocweFIZAqq9UFt5iVS2ZCoCicUSjzyzU3ietLKo5le86tBNbjH2DkuJmgWORy2lCNgsGyaTCU2gpNGM7aOX64ZCoKftmkli20Ay4fxtMThMzZA4d7V4QMYQZBAZAHjZCYfBRPQowZDZD
+
+# Instagram Account (wird nach Instagram-Verbindung ergänzt)
+INSTAGRAM_ACCOUNT_ID=
+
+# Webhook Verification
+WEBHOOK_VERIFY_TOKEN=your_random_verify_token_here
+
+# BigQuery
+GOOGLE_CLOUD_PROJECT=root-slate-454410-u0
+BIGQUERY_DATASET=instagram_messages
+
+# Google Gemini für KI-Antwortvorschläge
+# Hol dir einen Key unter: https://makersuite.google.com/app/apikey
+GEMINI_API_KEY=your_gemini_key_here
