@@ -515,9 +515,75 @@ def render_chat_view(sender_id: str, auto_refresh_chat: bool = False):
                 st.success("✅ Tags gespeichert!")
                 st.rerun()
     
+    # === ANTWORT-BOX (oben, damit man die letzte Nachricht sieht) ===
+    last_msg_text = last_msg.get('message_text', '')
+    reply_key = f"reply_{sender_id}"
+    
+    # Letzte Nachricht anzeigen
+    st.markdown(f"""
+    <div style="background:#f5f5f5; padding:10px; border-radius:8px; margin:10px 0; border-left:3px solid #ddd;">
+        <small style="color:#888;">Letzte Nachricht:</small><br>
+        {last_msg_text}
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # KI-Button und Textfeld in einer Zeile
+    col_ai, col_spacer = st.columns([1, 4])
+    with col_ai:
+        if st.button("✨ KI-Vorschlag", key=f"ai_{sender_id}"):
+            with st.spinner("Schreibt..."):
+                history = ""
+                for _, m in messages.tail(3).iterrows():
+                    history += f"Kunde: {m.get('message_text', '')}\n"
+                    if m.get('response_text'):
+                        history += f"Wir: {m.get('response_text')}\n"
+                suggestion = generate_ai_reply(last_msg_text, sender_name, history)
+                st.session_state[reply_key] = suggestion
+                st.rerun()
+    
+    # Text Area
+    if reply_key not in st.session_state:
+        st.session_state[reply_key] = ""
+    
+    reply_text = st.text_area(
+        "Antwort schreiben...",
+        height=80,
+        key=reply_key,
+        label_visibility="collapsed"
+    )
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("📤 Senden", type="primary", key=f"send_{sender_id}"):
+            if reply_text:
+                success, msg = send_instagram_message(sender_id, reply_text)
+                if success:
+                    user_kuerzel = st.session_state.get('user_kuerzel', 'XX')
+                    update_message(last_msg['message_id'], {
+                        "response_text": reply_text,
+                        "responded_at": datetime.utcnow().isoformat(),
+                        "responded_by": user_kuerzel
+                    })
+                    st.success(f"✅ Gesendet ({user_kuerzel})")
+                    if reply_key in st.session_state:
+                        del st.session_state[reply_key]
+                    st.rerun()
+                else:
+                    st.error(f"❌ {msg}")
+    with col2:
+        if st.button("✅ Als beantwortet markieren", key=f"done_{sender_id}"):
+            user_kuerzel = st.session_state.get('user_kuerzel', 'XX')
+            update_message(last_msg['message_id'], {
+                "response_text": "[Extern beantwortet]",
+                "responded_at": datetime.utcnow().isoformat(),
+                "responded_by": user_kuerzel
+            })
+            st.success(f"✅ Markiert ({user_kuerzel})")
+            st.rerun()
+    
     st.divider()
     
-    # Chat-Verlauf (neueste zuerst)
+    # === CHAT-VERLAUF (neueste zuerst) ===
     # Pagination State
     page_key = f"chat_page_{sender_id}"
     if page_key not in st.session_state:
@@ -534,13 +600,6 @@ def render_chat_view(sender_id: str, auto_refresh_chat: bool = False):
     start_idx = 0
     end_idx = current_page * messages_per_page
     messages_to_show = messages_reversed.iloc[start_idx:end_idx]
-    
-    # "Mehr laden" Button (falls es mehr gibt)
-    if end_idx < total_messages:
-        remaining = total_messages - end_idx
-        if st.button(f"📜 Ältere Nachrichten laden ({remaining} weitere)", key=f"load_more_{sender_id}"):
-            st.session_state[page_key] += 1
-            st.rerun()
     
     # Nachrichten anzeigen (neueste oben)
     for _, msg in messages_to_show.iterrows():
@@ -571,72 +630,13 @@ def render_chat_view(sender_id: str, auto_refresh_chat: bool = False):
         </div>
         """, unsafe_allow_html=True)
     
-    st.divider()
-    
-    # Antwort-Box
-    st.subheader("💬 Antworten")
-    
-    last_msg_text = last_msg.get('message_text', '')
-    reply_key = f"reply_{sender_id}"
-    
-    # KI-Button
-    if st.button("✨ KI-Vorschlag", key=f"ai_{sender_id}"):
-        with st.spinner("Schreibt..."):
-            # Kontext aus letzten Nachrichten
-            history = ""
-            for _, m in messages.tail(3).iterrows():
-                history += f"Kunde: {m.get('message_text', '')}\n"
-                if m.get('response_text'):
-                    history += f"Wir: {m.get('response_text')}\n"
-            
-            suggestion = generate_ai_reply(last_msg_text, sender_name, history)
-            st.session_state[reply_key] = suggestion
+    # "Mehr laden" Button unten (falls es ältere Nachrichten gibt)
+    if end_idx < total_messages:
+        remaining = total_messages - end_idx
+        if st.button(f"📜 Ältere Nachrichten laden ({remaining} weitere)", key=f"load_more_{sender_id}"):
+            st.session_state[page_key] += 1
             st.rerun()
     
-    # Text Area
-    if reply_key not in st.session_state:
-        st.session_state[reply_key] = ""
-    
-    reply_text = st.text_area(
-        "Nachricht",
-        height=100,
-        key=reply_key
-    )
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        if st.button("📤 Senden", type="primary", key=f"send_{sender_id}"):
-            if reply_text:
-                # Sende an Instagram
-                success, msg = send_instagram_message(sender_id, reply_text)
-                
-                if success:
-                    # Speichere in DB mit User-Kürzel
-                    user_kuerzel = st.session_state.get('user_kuerzel', 'XX')
-                    update_message(last_msg['message_id'], {
-                        "response_text": reply_text,
-                        "responded_at": datetime.utcnow().isoformat(),
-                        "responded_by": user_kuerzel
-                    })
-                    st.success(f"✅ Gesendet ({user_kuerzel})")
-                    if reply_key in st.session_state:
-                        del st.session_state[reply_key]
-                    st.rerun()
-                else:
-                    st.error(f"❌ {msg}")
-    
-    with col2:
-        if st.button("✅ Als beantwortet markieren", key=f"done_{sender_id}"):
-            # Leere Antwort setzen um als "beantwortet" zu markieren
-            user_kuerzel = st.session_state.get('user_kuerzel', 'XX')
-            update_message(last_msg['message_id'], {
-                "response_text": "[Extern beantwortet]",
-                "responded_at": datetime.utcnow().isoformat(),
-                "responded_by": user_kuerzel
-            })
-            st.success(f"✅ Markiert ({user_kuerzel})")
-            st.rerun()
 
 
 def main():
