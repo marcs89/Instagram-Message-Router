@@ -623,36 +623,60 @@ def load_conversations(filter_type: str = "all", filter_tags_str: str = ""):
     
     own_id = get_own_instagram_id()
     
-    # Filter out our own account and demo users
-    where_clauses = [
-        f"sender_id != '{own_id}'",
-        "sender_id NOT LIKE 'demo_%'"
-    ]
+    # Base query - get latest message status per sender
+    # Only check if the LATEST message is unanswered, not all messages
+    query = f"""
+    WITH latest_messages AS (
+        SELECT 
+            sender_id,
+            sender_name,
+            message_text,
+            tags,
+            response_text,
+            received_at,
+            ROW_NUMBER() OVER (PARTITION BY sender_id ORDER BY received_at DESC) as rn
+        FROM `root-slate-454410-u0.instagram_messages.messages`
+        WHERE sender_id != '{own_id}'
+          AND sender_id NOT LIKE 'demo_%'
+          AND sender_id NOT LIKE 'test_%'
+    ),
+    conversation_stats AS (
+        SELECT 
+            sender_id,
+            MAX(sender_name) as sender_name,
+            COUNT(*) as message_count,
+            MAX(received_at) as last_message_at
+        FROM `root-slate-454410-u0.instagram_messages.messages`
+        WHERE sender_id != '{own_id}'
+          AND sender_id NOT LIKE 'demo_%'
+          AND sender_id NOT LIKE 'test_%'
+        GROUP BY sender_id
+    )
+    SELECT 
+        cs.sender_id,
+        cs.sender_name,
+        cs.message_count,
+        cs.last_message_at,
+        CASE WHEN lm.response_text IS NULL OR lm.response_text = '' THEN 1 ELSE 0 END as has_unanswered,
+        lm.tags,
+        lm.message_text as last_message
+    FROM conversation_stats cs
+    JOIN latest_messages lm ON cs.sender_id = lm.sender_id AND lm.rn = 1
+    WHERE 1=1
+    """
     
+    # Apply filters
     if filter_type == "unbeantwortet":
-        where_clauses.append("(response_text IS NULL OR response_text = '')")
+        query += " AND (lm.response_text IS NULL OR lm.response_text = '')"
     
     if filter_tags_str:
         filter_tags = filter_tags_str.split(",")
         tag_conditions = []
         for tag in filter_tags:
-            tag_conditions.append(f"tags LIKE '%{tag}%'")
-        where_clauses.append(f"({' OR '.join(tag_conditions)})")
+            tag_conditions.append(f"lm.tags LIKE '%{tag}%'")
+        query += f" AND ({' OR '.join(tag_conditions)})"
     
-    where_sql = " AND ".join(where_clauses)
-    
-    query = f"""
-    SELECT 
-        sender_id,
-        sender_name,
-        COUNT(*) as message_count,
-        MAX(received_at) as last_message_at,
-        MAX(CASE WHEN response_text IS NULL OR response_text = '' THEN 1 ELSE 0 END) as has_unanswered,
-        ARRAY_AGG(tags IGNORE NULLS ORDER BY received_at DESC LIMIT 1)[OFFSET(0)] as tags,
-        ARRAY_AGG(message_text ORDER BY received_at DESC LIMIT 1)[OFFSET(0)] as last_message
-    FROM `root-slate-454410-u0.instagram_messages.messages`
-    WHERE {where_sql}
-    GROUP BY sender_id, sender_name
+    query += """
     ORDER BY 
         has_unanswered DESC,
         last_message_at DESC
@@ -937,13 +961,21 @@ def main():
                 own_id = get_own_instagram_id()
                 stats = {"chats": 0, "comments": 0}
                 try:
-                    # Count CONVERSATIONS with unanswered messages, not individual messages
+                    # Count CONVERSATIONS where the LATEST message is unanswered
                     chat_stats = client.query(f"""
-                    SELECT COUNT(DISTINCT sender_id) as offen
-                    FROM `root-slate-454410-u0.instagram_messages.messages`
-                    WHERE sender_id != '{own_id}'
-                      AND sender_id NOT LIKE 'demo_%'
-                      AND (response_text IS NULL OR response_text = '')
+                    WITH latest_per_sender AS (
+                        SELECT 
+                            sender_id,
+                            response_text,
+                            ROW_NUMBER() OVER (PARTITION BY sender_id ORDER BY received_at DESC) as rn
+                        FROM `root-slate-454410-u0.instagram_messages.messages`
+                        WHERE sender_id != '{own_id}'
+                          AND sender_id NOT LIKE 'demo_%'
+                          AND sender_id NOT LIKE 'test_%'
+                    )
+                    SELECT COUNT(*) as offen
+                    FROM latest_per_sender
+                    WHERE rn = 1 AND (response_text IS NULL OR response_text = '')
                     """).to_dataframe().iloc[0]
                     stats["chats"] = int(chat_stats['offen'])
                 except:
