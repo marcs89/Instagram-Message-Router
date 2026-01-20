@@ -1283,9 +1283,12 @@ Sentiment: {sentiment}
             
             if not comments.empty:
                 for idx, comment in comments.iterrows():
-                    sentiment = comment.get('sentiment', 'neutral')
-                    has_response = bool(comment.get('response_text'))
-                    is_liked = bool(comment.get('is_liked'))
+                    sentiment = comment.get('sentiment', 'neutral') or 'neutral'
+                    # Safe boolean checks for NA/NaN values
+                    response_text = comment.get('response_text')
+                    has_response = pd.notna(response_text) and response_text != ''
+                    liked_val = comment.get('is_liked')
+                    is_liked = pd.notna(liked_val) and liked_val == True
                     is_processed = has_response or is_liked
                     post_type = comment.get('post_type', 'post')
                     
