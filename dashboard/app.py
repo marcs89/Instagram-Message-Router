@@ -118,6 +118,15 @@ st.set_page_config(
     layout="wide"
 )
 
+# Team-Mitglieder (Kürzel -> Name) - Muss vor Login definiert sein
+TEAM_MEMBERS = {
+    "AS": "Anni",
+    "MS": "Marc",
+    "SM": "Sina",
+    "JD": "Jessy",
+    "SG": "Sinem"
+}
+
 # === LOGIN ===
 def get_user_passwords():
     """Holt User-Passwörter aus Secrets"""
@@ -279,15 +288,6 @@ def get_bq_client():
 
 # Standard Tags
 DEFAULT_TAGS = ["Kundenservice", "Kooperationen", "Feedback"]
-
-# Team-Mitglieder (Kürzel -> Name)
-TEAM_MEMBERS = {
-    "AS": "Anni",
-    "MS": "Marc",
-    "SM": "Sina",
-    "JD": "Jessy",
-    "SG": "Sinem"
-}
 
 @st.cache_data(ttl=60)  # Cache for 60 seconds
 def get_all_tags():
