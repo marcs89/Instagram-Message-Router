@@ -891,7 +891,6 @@ def main():
         st.markdown("""
         <div style="display: flex; align-items: center; gap: 10px;">
             <img src="https://lilimaus.de/cdn/shop/files/Lilimaus_Logo_241212.png?v=1743081255" height="30">
-            <span style="color: #666; font-size: 14px;">Inbox</span>
         </div>
         """, unsafe_allow_html=True)
     with col_user:
