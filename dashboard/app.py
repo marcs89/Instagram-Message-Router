@@ -720,9 +720,12 @@ def render_chat_view(sender_id: str, auto_refresh_chat: bool = False):
         st.info("Keine Nachrichten")
         return
     
-    # Get username from Instagram API
+    # Get username from Instagram API, DB, or use shortened ID
     user_info = get_cached_user_info(sender_id)
-    sender_name = user_info.get('username', '') or messages.iloc[0].get('sender_name', '') or 'Unbekannt'
+    db_name = messages.iloc[0].get('sender_name', '') or ''
+    api_name = user_info.get('username', '') or ''
+    # Fallback chain: API > DB > shortened sender_id
+    sender_name = api_name or db_name or f"User {sender_id[:12]}..."
     last_msg = messages.iloc[-1]
     
     # Header with optional auto-refresh for chat messages only
@@ -866,13 +869,22 @@ def render_chat_view(sender_id: str, auto_refresh_chat: bool = False):
             """, unsafe_allow_html=True)
         
         # Eingehende Nachricht
-        message_text = msg.get('message_text', '')
-        st.markdown(f"""
-        <div class="message-incoming">
-            <div>{message_text}</div>
-            <div class="message-time">{time_str}</div>
-        </div>
-        """, unsafe_allow_html=True)
+        message_text = msg.get('message_text', '') or ''
+        if message_text.strip():
+            st.markdown(f"""
+            <div class="message-incoming">
+                <div>{message_text}</div>
+                <div class="message-time">{time_str}</div>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            # Leere Nachricht - trotzdem anzeigen mit Hinweis
+            st.markdown(f"""
+            <div class="message-incoming" style="opacity: 0.6;">
+                <div><em>[Nachricht ohne Text]</em></div>
+                <div class="message-time">{time_str}</div>
+            </div>
+            """, unsafe_allow_html=True)
     
     # "Mehr laden" Button unten (falls es ältere Nachrichten gibt)
     if end_idx < total_messages:
