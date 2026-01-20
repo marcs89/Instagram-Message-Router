@@ -515,31 +515,21 @@ def render_chat_view(sender_id: str, auto_refresh_chat: bool = False):
                 st.success("✅ Tags gespeichert!")
                 st.rerun()
     
-    # === ANTWORT-BOX (oben, damit man die letzte Nachricht sieht) ===
+    # === ANTWORT-BOX (oben) ===
     last_msg_text = last_msg.get('message_text', '')
     reply_key = f"reply_{sender_id}"
     
-    # Letzte Nachricht anzeigen
-    st.markdown(f"""
-    <div style="background:#f5f5f5; padding:10px; border-radius:8px; margin:10px 0; border-left:3px solid #ddd;">
-        <small style="color:#888;">Letzte Nachricht:</small><br>
-        {last_msg_text}
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # KI-Button und Textfeld in einer Zeile
-    col_ai, col_spacer = st.columns([1, 4])
-    with col_ai:
-        if st.button("✨ KI-Vorschlag", key=f"ai_{sender_id}"):
-            with st.spinner("Schreibt..."):
-                history = ""
-                for _, m in messages.tail(3).iterrows():
-                    history += f"Kunde: {m.get('message_text', '')}\n"
-                    if m.get('response_text'):
-                        history += f"Wir: {m.get('response_text')}\n"
-                suggestion = generate_ai_reply(last_msg_text, sender_name, history)
-                st.session_state[reply_key] = suggestion
-                st.rerun()
+    # KI-Button
+    if st.button("✨ KI-Vorschlag", key=f"ai_{sender_id}"):
+        with st.spinner("Schreibt..."):
+            history = ""
+            for _, m in messages.tail(3).iterrows():
+                history += f"Kunde: {m.get('message_text', '')}\n"
+                if m.get('response_text'):
+                    history += f"Wir: {m.get('response_text')}\n"
+            suggestion = generate_ai_reply(last_msg_text, sender_name, history)
+            st.session_state[reply_key] = suggestion
+            st.rerun()
     
     # Text Area
     if reply_key not in st.session_state:
