@@ -300,7 +300,7 @@ def ensure_comments_table_schema():
             pass
 
 def sync_instagram_comments():
-    """Synchronisiert Instagram Kommentare mit BigQuery
+    """Synchronisiert NUR Ad-Kommentare mit BigQuery (keine normalen Posts)
     Returns: (new_count, synced_count, debug_info)
     """
     client = get_bq_client()
@@ -313,8 +313,12 @@ def sync_instagram_comments():
     ad_shortcodes, ads_debug = load_active_ad_shortcodes()
     debug_messages.append(f"Ads: {ads_debug}")
     
+    if not ad_shortcodes:
+        debug_messages.append("Keine Ad-Shortcodes gefunden - Sync abgebrochen")
+        return 0, 0, " | ".join(debug_messages)
+    
     # 2. Lade Posts
-    posts = load_instagram_posts(limit=30)
+    posts = load_instagram_posts(limit=50)  # Mehr Posts laden um Ads zu finden
     debug_messages.append(f"Posts geladen: {len(posts)}")
     
     synced_count = 0
@@ -322,18 +326,21 @@ def sync_instagram_comments():
     ad_posts_found = 0
     
     for post in posts:
+        shortcode = post.get("shortcode", "")
+        
+        # NUR Ad-Posts verarbeiten - normale Posts ignorieren
+        if shortcode not in ad_shortcodes:
+            continue
+        
         if post.get("comments_count", 0) == 0:
             continue
         
+        ad_posts_found += 1
         post_id = post["id"]
-        shortcode = post.get("shortcode", "")
-        is_ad = shortcode in ad_shortcodes
-        if is_ad:
-            ad_posts_found += 1
-        post_type = "ad" if is_ad else "post"
+        post_type = "ad"  # Immer "ad" da wir nur Ads laden
         caption = (post.get("caption", "") or "")[:200]
         
-        # Lade Kommentare für diesen Post
+        # Lade Kommentare für diesen Ad-Post
         comments = load_post_comments(post_id, limit=100)
         
         for comment in comments:
@@ -1174,41 +1181,28 @@ Sentiment: {sentiment}
                 COUNT(*) as total,
                 COUNTIF((response_text IS NULL OR response_text = '') AND (is_liked IS NULL OR is_liked = FALSE)) as offen,
                 COUNTIF(sentiment = 'negative') as negative,
-                COUNTIF(sentiment = 'question') as questions,
-                COUNTIF(post_type = 'ad') as ads,
-                COUNTIF(post_type = 'post' OR post_type IS NULL) as posts
+                COUNTIF(sentiment = 'question') as questions
             FROM `root-slate-454410-u0.instagram_messages.ad_comments`
-            WHERE is_deleted = FALSE
+            WHERE is_deleted = FALSE AND post_type = 'ad'
             """).to_dataframe().iloc[0]
             
-            col1, col2, col3, col4, col5, col6 = st.columns(6)
+            col1, col2, col3, col4 = st.columns(4)
             col1.metric("📊 Gesamt", int(stats.get('total', 0) or 0))
             col2.metric("⚠️ Offen", int(stats.get('offen', 0) or 0))
             col3.metric("🔴 Negativ", int(stats.get('negative', 0) or 0))
             col4.metric("🟡 Fragen", int(stats.get('questions', 0) or 0))
-            col5.metric("📢 Ads", int(stats.get('ads', 0) or 0))
-            col6.metric("📝 Posts", int(stats.get('posts', 0) or 0))
         except:
             pass
         
         st.divider()
         
-        # Filter
-        col_f1, col_f2 = st.columns(2)
-        with col_f1:
-            comment_filter = st.radio(
-                "Status",
-                ["Alle", "Unbearbeitet"],
-                horizontal=True,
-                key="comment_filter"
-            )
-        with col_f2:
-            type_filter = st.radio(
-                "Typ",
-                ["Alle", "Nur Ads", "Nur Posts"],
-                horizontal=True,
-                key="type_filter"
-            )
+        # Filter (nur Status, kein Typ mehr nötig)
+        comment_filter = st.radio(
+            "Anzeigen",
+            ["Alle", "Unbearbeitet"],
+            horizontal=True,
+            key="comment_filter"
+        )
         
         st.divider()
         
@@ -1305,18 +1299,12 @@ Sentiment: {sentiment}
             except Exception as e:
                 st.error(f"Fehler: {e}")
         
-        # Kommentare laden
+        # Kommentare laden (nur Ads)
         try:
-            # Filter anwenden
-            where_clause = "is_deleted = FALSE"
+            # Filter anwenden - nur Ad-Kommentare
+            where_clause = "is_deleted = FALSE AND post_type = 'ad'"
             if comment_filter == "Unbearbeitet":
                 where_clause += " AND (response_text IS NULL OR response_text = '') AND (is_liked IS NULL OR is_liked = FALSE)"
-            
-            # Typ-Filter
-            if type_filter == "Nur Ads":
-                where_clause += " AND post_type = 'ad'"
-            elif type_filter == "Nur Posts":
-                where_clause += " AND (post_type = 'post' OR post_type IS NULL)"
             
             comments = client.query(f"""
             SELECT * FROM `root-slate-454410-u0.instagram_messages.ad_comments`
@@ -1337,22 +1325,14 @@ Sentiment: {sentiment}
                     liked_val = comment.get('is_liked')
                     is_liked = pd.notna(liked_val) and liked_val == True
                     is_processed = has_response or is_liked
-                    post_type = comment.get('post_type', 'post')
                     
                     # Icon basierend auf Sentiment
                     sentiment_icon = "🔴" if sentiment == 'negative' else ("🟡" if sentiment == 'question' else "🟢")
                     
-                    # Post-Typ Badge
-                    type_badge = "📢 Ad" if post_type == 'ad' else "📝 Post"
-                    type_color = "#FFE4B5" if post_type == 'ad' else "#E0E0E0"
-                    
                     with st.container():
-                        # Status-Zeile
-                        status_html = ""
+                        # Status-Zeile (nur Unbearbeitet-Badge wenn nötig)
                         if not is_processed:
-                            status_html += f"<span style='background: #FFF3CD; padding: 2px 8px; border-radius: 4px; font-size: 12px; margin-right: 8px;'>⚠️ Unbearbeitet</span>"
-                        status_html += f"<span style='background: {type_color}; padding: 2px 8px; border-radius: 4px; font-size: 12px;'>{type_badge}</span>"
-                        st.markdown(status_html, unsafe_allow_html=True)
+                            st.markdown("<span style='background: #FFF3CD; padding: 2px 8px; border-radius: 4px; font-size: 12px;'>⚠️ Unbearbeitet</span>", unsafe_allow_html=True)
                         
                         col1, col2, col3 = st.columns([4, 1, 1])
                         
