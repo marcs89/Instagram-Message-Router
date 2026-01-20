@@ -111,6 +111,260 @@ def send_instagram_message(recipient_id: str, message_text: str) -> tuple[bool, 
     except Exception as e:
         return False, f"Fehler: {str(e)}"
 
+
+# === INSTAGRAM POSTS & COMMENTS API ===
+def get_ad_account_id():
+    """Get Ad Account ID from secrets or env"""
+    return st.secrets.get("AD_ACCOUNT_ID", os.getenv("AD_ACCOUNT_ID", "1266832358443930"))
+
+def load_active_ad_shortcodes() -> set:
+    """Lädt alle Shortcodes von aktiven Ads"""
+    token = get_page_access_token()
+    if not token:
+        return set()
+    
+    ad_shortcodes = set()
+    ad_account_id = get_ad_account_id()
+    
+    try:
+        # Lade aktive Ads
+        ads_url = f"https://graph.facebook.com/v21.0/act_{ad_account_id}/ads"
+        params = {
+            "fields": "id,name,status,creative",
+            "limit": 100,
+            "access_token": token
+        }
+        
+        response = requests.get(ads_url, params=params, timeout=30)
+        if response.status_code != 200:
+            return set()
+        
+        ads_data = response.json().get("data", [])
+        
+        # Für jede Ad das Creative laden und Shortcode extrahieren
+        for ad in ads_data:
+            creative_id = ad.get("creative", {}).get("id")
+            if creative_id:
+                creative_url = f"https://graph.facebook.com/v21.0/{creative_id}"
+                creative_params = {
+                    "fields": "instagram_permalink_url",
+                    "access_token": token
+                }
+                creative_response = requests.get(creative_url, params=creative_params, timeout=10)
+                if creative_response.status_code == 200:
+                    permalink = creative_response.json().get("instagram_permalink_url", "")
+                    # Extrahiere Shortcode aus URL: https://www.instagram.com/p/SHORTCODE/
+                    if "/p/" in permalink:
+                        shortcode = permalink.split("/p/")[1].rstrip("/")
+                        ad_shortcodes.add(shortcode)
+                    elif "/reel/" in permalink:
+                        shortcode = permalink.split("/reel/")[1].rstrip("/")
+                        ad_shortcodes.add(shortcode)
+    except Exception as e:
+        print(f"Error loading ad shortcodes: {e}")
+    
+    return ad_shortcodes
+
+def load_instagram_posts(limit: int = 20) -> list:
+    """Lädt Instagram Posts mit Kommentar-Anzahl"""
+    token = get_page_access_token()
+    ig_account_id = get_instagram_account_id()
+    
+    if not token or not ig_account_id:
+        return []
+    
+    try:
+        url = f"https://graph.facebook.com/v21.0/{ig_account_id}/media"
+        params = {
+            "fields": "id,caption,comments_count,shortcode,timestamp,permalink,media_type",
+            "limit": limit,
+            "access_token": token
+        }
+        
+        response = requests.get(url, params=params, timeout=30)
+        if response.status_code == 200:
+            return response.json().get("data", [])
+    except Exception as e:
+        print(f"Error loading posts: {e}")
+    
+    return []
+
+def load_post_comments(media_id: str, limit: int = 50) -> list:
+    """Lädt Kommentare eines Posts"""
+    token = get_page_access_token()
+    if not token:
+        return []
+    
+    try:
+        url = f"https://graph.facebook.com/v21.0/{media_id}/comments"
+        params = {
+            "fields": "id,text,timestamp,username,from",
+            "limit": limit,
+            "access_token": token
+        }
+        
+        response = requests.get(url, params=params, timeout=30)
+        if response.status_code == 200:
+            return response.json().get("data", [])
+    except Exception as e:
+        print(f"Error loading comments for {media_id}: {e}")
+    
+    return []
+
+def reply_to_comment(comment_id: str, message: str) -> tuple[bool, str]:
+    """Antwortet auf einen Instagram Kommentar"""
+    token = get_page_access_token()
+    if not token:
+        return False, "Kein Page Access Token konfiguriert"
+    
+    try:
+        url = f"https://graph.facebook.com/v21.0/{comment_id}/replies"
+        params = {
+            "message": message,
+            "access_token": token
+        }
+        
+        response = requests.post(url, params=params, timeout=10)
+        if response.status_code == 200:
+            return True, "Antwort gesendet"
+        else:
+            error_data = response.json()
+            error_msg = error_data.get("error", {}).get("message", "Unbekannter Fehler")
+            return False, f"API Fehler: {error_msg}"
+    except Exception as e:
+        return False, f"Fehler: {str(e)}"
+
+def analyze_sentiment(text: str) -> str:
+    """Einfache Sentiment-Analyse"""
+    text_lower = text.lower()
+    
+    # Negative Keywords
+    negative_words = ["schlecht", "enttäuscht", "ärger", "problem", "kaputt", "defekt", 
+                      "reklamation", "beschwerde", "mangelhaft", "nie wieder", "unverschämt",
+                      "betrug", "abzocke", "schrott", "müll", "furchtbar", "horrible"]
+    
+    # Question indicators
+    question_words = ["?", "wann", "wie", "wo", "warum", "weshalb", "kann man", "gibt es",
+                      "habt ihr", "könnt ihr", "verfügbar", "lieferzeit", "größe"]
+    
+    # Check for negative
+    for word in negative_words:
+        if word in text_lower:
+            return "negative"
+    
+    # Check for question
+    for word in question_words:
+        if word in text_lower:
+            return "question"
+    
+    return "positive"
+
+def ensure_comments_table_schema():
+    """Stellt sicher dass die BigQuery Tabelle alle nötigen Spalten hat"""
+    client = get_bq_client()
+    
+    # Prüfe/Erstelle Spalten
+    alter_queries = [
+        "ALTER TABLE `root-slate-454410-u0.instagram_messages.ad_comments` ADD COLUMN IF NOT EXISTS post_shortcode STRING",
+        "ALTER TABLE `root-slate-454410-u0.instagram_messages.ad_comments` ADD COLUMN IF NOT EXISTS post_type STRING",
+        "ALTER TABLE `root-slate-454410-u0.instagram_messages.ad_comments` ADD COLUMN IF NOT EXISTS responded_by STRING",
+    ]
+    
+    for query in alter_queries:
+        try:
+            client.query(query).result()
+        except Exception as e:
+            # Spalte existiert bereits oder anderer Fehler - ignorieren
+            pass
+
+def sync_instagram_comments():
+    """Synchronisiert Instagram Kommentare mit BigQuery"""
+    client = get_bq_client()
+    
+    # Schema sicherstellen
+    ensure_comments_table_schema()
+    
+    # 1. Lade Ad Shortcodes
+    ad_shortcodes = load_active_ad_shortcodes()
+    
+    # 2. Lade Posts
+    posts = load_instagram_posts(limit=30)
+    
+    synced_count = 0
+    new_count = 0
+    
+    for post in posts:
+        if post.get("comments_count", 0) == 0:
+            continue
+        
+        post_id = post["id"]
+        shortcode = post.get("shortcode", "")
+        is_ad = shortcode in ad_shortcodes
+        post_type = "ad" if is_ad else "post"
+        caption = (post.get("caption", "") or "")[:200]
+        
+        # Lade Kommentare für diesen Post
+        comments = load_post_comments(post_id, limit=100)
+        
+        for comment in comments:
+            comment_id = comment.get("id", "")
+            comment_text = comment.get("text", "")
+            username = comment.get("username", "") or comment.get("from", {}).get("username", "")
+            commenter_id = comment.get("from", {}).get("id", "")
+            timestamp = comment.get("timestamp", "")
+            
+            if not comment_id or not comment_text:
+                continue
+            
+            # Prüfe ob Kommentar bereits existiert
+            check_query = f"""
+            SELECT comment_id FROM `root-slate-454410-u0.instagram_messages.ad_comments`
+            WHERE comment_id = '{comment_id}'
+            """
+            try:
+                existing = client.query(check_query).to_dataframe()
+                if not existing.empty:
+                    synced_count += 1
+                    continue
+            except:
+                pass
+            
+            # Sentiment analysieren
+            sentiment = analyze_sentiment(comment_text)
+            priority = "high" if sentiment == "negative" else ("medium" if sentiment == "question" else "normal")
+            
+            # In BigQuery speichern
+            insert_query = f"""
+            INSERT INTO `root-slate-454410-u0.instagram_messages.ad_comments`
+            (comment_id, post_id, post_shortcode, post_type, ad_name, commenter_id, commenter_name, 
+             comment_text, created_at, sentiment, status, is_hidden, is_deleted, priority)
+            VALUES (
+                '{comment_id}',
+                '{post_id}',
+                '{shortcode}',
+                '{post_type}',
+                '{caption.replace("'", "''")}',
+                '{commenter_id}',
+                '{username.replace("'", "''")}',
+                '{comment_text.replace("'", "''")}',
+                TIMESTAMP('{timestamp}'),
+                '{sentiment}',
+                'new',
+                FALSE,
+                FALSE,
+                '{priority}'
+            )
+            """
+            try:
+                client.query(insert_query).result()
+                new_count += 1
+            except Exception as e:
+                print(f"Error inserting comment {comment_id}: {e}")
+        
+        synced_count += len(comments)
+    
+    return new_count, synced_count
+
 # Page Config
 st.set_page_config(
     page_title="LILIMAUS Inbox",
@@ -778,7 +1032,22 @@ def main():
     
     # ===== TAB 2: Ad-Kommentare =====
     with tab2:
-        st.subheader("📢 Ad-Kommentare")
+        # Header mit Sync-Button
+        col_title, col_sync = st.columns([3, 1])
+        with col_title:
+            st.subheader("📢 Kommentare")
+        with col_sync:
+            if st.button("🔄 Sync Instagram", key="sync_comments"):
+                with st.spinner("Lade Kommentare von Instagram..."):
+                    try:
+                        new_count, total_count = sync_instagram_comments()
+                        if new_count > 0:
+                            st.success(f"✅ {new_count} neue Kommentare geladen!")
+                        else:
+                            st.info(f"Keine neuen Kommentare. ({total_count} geprüft)")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Fehler beim Sync: {e}")
         
         # Funktion für KI-Antwort
         def generate_comment_reply(comment_text: str, sentiment: str, commenter_name: str) -> str:
@@ -816,17 +1085,19 @@ Sentiment: {sentiment}
                 COUNTIF((response_text IS NULL OR response_text = '') AND (is_liked IS NULL OR is_liked = FALSE)) as offen,
                 COUNTIF(sentiment = 'negative') as negative,
                 COUNTIF(sentiment = 'question') as questions,
-                COUNTIF(sentiment = 'positive') as positive
+                COUNTIF(post_type = 'ad') as ads,
+                COUNTIF(post_type = 'post' OR post_type IS NULL) as posts
             FROM `root-slate-454410-u0.instagram_messages.ad_comments`
             WHERE is_deleted = FALSE
             """).to_dataframe().iloc[0]
             
-            col1, col2, col3, col4, col5 = st.columns(5)
+            col1, col2, col3, col4, col5, col6 = st.columns(6)
             col1.metric("📊 Gesamt", int(stats.get('total', 0) or 0))
             col2.metric("⚠️ Offen", int(stats.get('offen', 0) or 0))
             col3.metric("🔴 Negativ", int(stats.get('negative', 0) or 0))
             col4.metric("🟡 Fragen", int(stats.get('questions', 0) or 0))
-            col5.metric("🟢 Positiv", int(stats.get('positive', 0) or 0))
+            col5.metric("📢 Ads", int(stats.get('ads', 0) or 0))
+            col6.metric("📝 Posts", int(stats.get('posts', 0) or 0))
         except:
             pass
         
@@ -836,10 +1107,17 @@ Sentiment: {sentiment}
         col_f1, col_f2 = st.columns(2)
         with col_f1:
             comment_filter = st.radio(
-                "Anzeigen",
+                "Status",
                 ["Alle", "Unbearbeitet"],
                 horizontal=True,
                 key="comment_filter"
+            )
+        with col_f2:
+            type_filter = st.radio(
+                "Typ",
+                ["Alle", "Nur Ads", "Nur Posts"],
+                horizontal=True,
+                key="type_filter"
             )
         
         st.divider()
@@ -876,30 +1154,57 @@ Sentiment: {sentiment}
                     
                     reply_text = st.text_area("Antwort", height=100, key=reply_key)
                     
-                    col1, col2, col3 = st.columns(3)
+                    col1, col2, col3, col4 = st.columns(4)
                     
                     with col1:
-                        if st.button("📤 Speichern", type="primary", key="save_comment"):
+                        if st.button("📤 Auf Instagram antworten", type="primary", key="send_comment"):
+                            # Echte Antwort auf Instagram senden
+                            success, msg = reply_to_comment(selected_id, reply_text)
+                            if success:
+                                # In DB speichern
+                                escaped_reply = reply_text.replace("'", "''")
+                                escaped_id = selected_id.replace("'", "''")
+                                user_kuerzel = st.session_state.get('user_kuerzel', 'XX')
+                                client.query(f"""
+                                UPDATE `root-slate-454410-u0.instagram_messages.ad_comments`
+                                SET response_text = '{escaped_reply}', 
+                                    responded_at = CURRENT_TIMESTAMP(),
+                                    responded_by = '{user_kuerzel}'
+                                WHERE comment_id = '{escaped_id}'
+                                """).result()
+                                st.success(f"✅ Antwort gesendet! ({user_kuerzel})")
+                                st.session_state.selected_comment_id = None
+                                if reply_key in st.session_state:
+                                    del st.session_state[reply_key]
+                                st.rerun()
+                            else:
+                                st.error(f"❌ {msg}")
+                    
+                    with col2:
+                        if st.button("💾 Nur speichern", key="save_comment"):
                             escaped_reply = reply_text.replace("'", "''")
                             escaped_id = selected_id.replace("'", "''")
+                            user_kuerzel = st.session_state.get('user_kuerzel', 'XX')
                             client.query(f"""
                             UPDATE `root-slate-454410-u0.instagram_messages.ad_comments`
-                            SET response_text = '{escaped_reply}', responded_at = CURRENT_TIMESTAMP()
+                            SET response_text = '{escaped_reply}', 
+                                responded_at = CURRENT_TIMESTAMP(),
+                                responded_by = '{user_kuerzel}'
                             WHERE comment_id = '{escaped_id}'
                             """).result()
-                            st.success("✅ Gespeichert!")
+                            st.success("✅ Gespeichert (nicht gesendet)")
                             st.session_state.selected_comment_id = None
                             if reply_key in st.session_state:
                                 del st.session_state[reply_key]
                             st.rerun()
                     
-                    with col2:
+                    with col3:
                         if st.button("🔄 Neu generieren", key="regen_comment"):
                             if reply_key in st.session_state:
                                 del st.session_state[reply_key]
                             st.rerun()
                     
-                    with col3:
+                    with col4:
                         if st.button("❌ Abbrechen", key="cancel_comment"):
                             st.session_state.selected_comment_id = None
                             if reply_key in st.session_state:
@@ -917,6 +1222,12 @@ Sentiment: {sentiment}
             if comment_filter == "Unbearbeitet":
                 where_clause += " AND (response_text IS NULL OR response_text = '') AND (is_liked IS NULL OR is_liked = FALSE)"
             
+            # Typ-Filter
+            if type_filter == "Nur Ads":
+                where_clause += " AND post_type = 'ad'"
+            elif type_filter == "Nur Posts":
+                where_clause += " AND (post_type = 'post' OR post_type IS NULL)"
+            
             comments = client.query(f"""
             SELECT * FROM `root-slate-454410-u0.instagram_messages.ad_comments`
             WHERE {where_clause}
@@ -933,17 +1244,22 @@ Sentiment: {sentiment}
                     has_response = bool(comment.get('response_text'))
                     is_liked = bool(comment.get('is_liked'))
                     is_processed = has_response or is_liked
+                    post_type = comment.get('post_type', 'post')
                     
                     # Icon basierend auf Sentiment
                     sentiment_icon = "🔴" if sentiment == 'negative' else ("🟡" if sentiment == 'question' else "🟢")
                     
-                    # Unbearbeitet-Indikator
-                    status_icon = "✅" if is_processed else "⚪"
+                    # Post-Typ Badge
+                    type_badge = "📢 Ad" if post_type == 'ad' else "📝 Post"
+                    type_color = "#FFE4B5" if post_type == 'ad' else "#E0E0E0"
                     
                     with st.container():
-                        # Warnung für unbearbeitete
+                        # Status-Zeile
+                        status_html = ""
                         if not is_processed:
-                            st.markdown(f"<div style='background: #FFF3CD; padding: 2px 8px; border-radius: 4px; display: inline-block; font-size: 12px; margin-bottom: 5px;'>⚠️ Unbearbeitet</div>", unsafe_allow_html=True)
+                            status_html += f"<span style='background: #FFF3CD; padding: 2px 8px; border-radius: 4px; font-size: 12px; margin-right: 8px;'>⚠️ Unbearbeitet</span>"
+                        status_html += f"<span style='background: {type_color}; padding: 2px 8px; border-radius: 4px; font-size: 12px;'>{type_badge}</span>"
+                        st.markdown(status_html, unsafe_allow_html=True)
                         
                         col1, col2, col3 = st.columns([4, 1, 1])
                         
@@ -956,7 +1272,11 @@ Sentiment: {sentiment}
                             elif is_liked:
                                 st.caption("❤️ Geliked")
                             
-                            st.caption(f"Ad: {comment.get('ad_name', '') or 'Unbekannt'}")
+                            # Post-Info (gekürzte Caption)
+                            ad_name = comment.get('ad_name', '') or ''
+                            if ad_name:
+                                short_caption = ad_name[:60] + "..." if len(ad_name) > 60 else ad_name
+                                st.caption(f"📄 {short_caption}")
                         
                         with col2:
                             # Like Button
@@ -982,7 +1302,7 @@ Sentiment: {sentiment}
                         
                         st.divider()
             else:
-                st.info("Keine Kommentare gefunden")
+                st.info("Keine Kommentare gefunden. Klicke auf '🔄 Sync Instagram' um Kommentare zu laden.")
                 
         except Exception as e:
             st.error(f"Fehler beim Laden: {e}")
