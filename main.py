@@ -143,11 +143,11 @@ def analyze_comment_sentiment(text: str) -> dict:
 
 
 def process_comment(change: dict, entry: dict) -> dict:
-    """Verarbeitet einen Ad/Post Kommentar"""
+    """Verarbeitet einen Ad/Post Kommentar (Webhook)"""
     value = change.get("value", {})
     
-    comment_id = value.get("comment_id", "")
-    post_id = value.get("post_id", entry.get("id", ""))
+    comment_id = value.get("comment_id", "") or value.get("id", "")
+    post_id = value.get("post_id", "") or value.get("media_id", "") or entry.get("id", "")
     
     # Kommentar-Details
     comment_text = value.get("message", "") or value.get("text", "")
@@ -156,19 +156,27 @@ def process_comment(change: dict, entry: dict) -> dict:
     # Commenter Info
     from_data = value.get("from", {})
     commenter_id = from_data.get("id", "unknown")
-    commenter_name = from_data.get("name", "Unbekannt")
+    commenter_name = from_data.get("name", "") or from_data.get("username", "Unbekannt")
     
     # Zeitstempel
-    created_time = value.get("created_time", "")
+    created_time = value.get("created_time", "") or value.get("timestamp", "")
+    if not created_time:
+        created_time = datetime.utcnow().isoformat()
     
     # Sentiment analysieren
     sentiment = analyze_comment_sentiment(comment_text)
     
+    # Post-Info aus dem Webhook (falls verfügbar)
+    media = value.get("media", {})
+    post_shortcode = media.get("shortcode", "")
+    
     return {
         "comment_id": comment_id,
         "post_id": post_id,
-        "ad_id": "",  # Wird später via API ergänzt
-        "ad_name": "",
+        "post_shortcode": post_shortcode,
+        "post_type": "ad",  # Webhook-Kommentare kommen von Ads
+        "ad_id": "",
+        "ad_name": "",  # Kann später via Dashboard ergänzt werden
         "commenter_id": commenter_id,
         "commenter_name": commenter_name,
         "comment_text": comment_text,
@@ -180,12 +188,14 @@ def process_comment(change: dict, entry: dict) -> dict:
         "is_question": sentiment["is_question"],
         "contains_complaint": sentiment["contains_complaint"],
         "status": "new",
-        "priority": "high" if sentiment["sentiment"] == "negative" else "normal"
+        "priority": "high" if sentiment["sentiment"] == "negative" else "normal",
+        "has_our_reply": False,
+        "is_done": False
     }
 
 
 def save_comment_to_bigquery(comment_data: dict):
-    """Speichert einen Kommentar in BigQuery"""
+    """Speichert einen Kommentar in BigQuery (Webhook)"""
     from google.cloud import bigquery
     
     try:
@@ -197,22 +207,48 @@ def save_comment_to_bigquery(comment_data: dict):
             if not isinstance(s, str): return str(s)
             return s.replace("'", "''").replace("\\", "\\\\")
         
+        # Prüfe erst ob Kommentar schon existiert
+        check_query = f"""
+        SELECT comment_id FROM `{table_id}`
+        WHERE comment_id = '{escape(comment_data.get("comment_id"))}'
+        """
+        check_result = client.query(check_query).to_dataframe()
+        
+        if not check_result.empty:
+            print(f"[BigQuery] Comment {comment_data.get('comment_id')} already exists, skipping")
+            return
+        
+        # Timestamp vorbereiten
+        created_at = comment_data.get("created_at", "")
+        if created_at:
+            # Versuche ISO Format zu parsen, sonst aktuelles Datum
+            try:
+                if "T" not in created_at:
+                    created_at = datetime.utcnow().isoformat()
+            except:
+                created_at = datetime.utcnow().isoformat()
+        else:
+            created_at = datetime.utcnow().isoformat()
+        
         query = f"""
         INSERT INTO `{table_id}`
-        (comment_id, post_id, ad_id, ad_name, commenter_id, commenter_name,
-         comment_text, parent_comment_id, created_at, received_at,
-         sentiment, sentiment_score, is_question, contains_complaint,
-         status, is_hidden, is_deleted, priority)
+        (comment_id, post_id, post_shortcode, post_type, ad_id, ad_name, 
+         commenter_id, commenter_name, comment_text, parent_comment_id, 
+         created_at, received_at, sentiment, sentiment_score, is_question, 
+         contains_complaint, status, is_hidden, is_deleted, priority,
+         has_our_reply, is_done)
         VALUES (
             '{escape(comment_data.get("comment_id"))}',
             '{escape(comment_data.get("post_id"))}',
-            '{escape(comment_data.get("ad_id"))}',
-            '{escape(comment_data.get("ad_name"))}',
+            '{escape(comment_data.get("post_shortcode", ""))}',
+            '{escape(comment_data.get("post_type", "ad"))}',
+            '{escape(comment_data.get("ad_id", ""))}',
+            '{escape(comment_data.get("ad_name", ""))}',
             '{escape(comment_data.get("commenter_id"))}',
             '{escape(comment_data.get("commenter_name"))}',
             '{escape(comment_data.get("comment_text"))}',
-            '{escape(comment_data.get("parent_comment_id"))}',
-            TIMESTAMP('{comment_data.get("created_at", datetime.utcnow().isoformat())}'),
+            '{escape(comment_data.get("parent_comment_id", ""))}',
+            TIMESTAMP('{created_at}'),
             TIMESTAMP('{comment_data.get("received_at")}'),
             '{escape(comment_data.get("sentiment", "positive"))}',
             {comment_data.get("sentiment_score", 0.5)},
@@ -221,7 +257,9 @@ def save_comment_to_bigquery(comment_data: dict):
             'new',
             FALSE,
             FALSE,
-            '{escape(comment_data.get("priority", "normal"))}'
+            '{escape(comment_data.get("priority", "normal"))}',
+            FALSE,
+            FALSE
         )
         """
         
@@ -355,7 +393,7 @@ def webhook(request: Request):
                     save_to_bigquery(processed)
                     
                     # Log für Debugging
-                    print(f"[Processed DM] {processed['primary_category']} | "
+                    print(f"[Processed DM] Tags: {processed['tags']} | "
                           f"Priority: {processed['priority']} | "
                           f"Text: {processed['message_text'][:50]}...")
                     
