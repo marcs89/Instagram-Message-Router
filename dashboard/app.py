@@ -83,15 +83,15 @@ def get_instagram_account_id():
     return st.secrets.get("INSTAGRAM_ACCOUNT_ID", os.getenv("INSTAGRAM_ACCOUNT_ID", ""))
 
 def send_instagram_message(recipient_id: str, message_text: str) -> tuple[bool, str]:
-    """Send a message via Instagram Graph API"""
-    token = get_page_access_token()
+    """Send a message via Instagram Graph API (using Instagram Token!)"""
+    # Use Instagram Token (IGAAT...) for sending DMs
+    token = get_instagram_access_token()
     if not token:
-        return False, "Kein Page Access Token konfiguriert"
+        return False, "Kein Instagram Access Token konfiguriert"
     
     try:
-        # Instagram uses the Page ID or Instagram Account ID for sending
-        # The recipient_id is the Instagram-scoped User ID (IGSID)
-        url = f"https://graph.facebook.com/v21.0/me/messages"
+        # Instagram Graph API endpoint (not Facebook!)
+        url = f"https://graph.instagram.com/v21.0/me/messages"
         
         payload = {
             "recipient": {"id": recipient_id},
