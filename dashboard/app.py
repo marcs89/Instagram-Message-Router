@@ -131,20 +131,33 @@ def load_ad_media_ids() -> tuple:
     debug_info = []
     
     try:
-        # Lade alle Ads
+        # Lade alle Ads (mit Pagination für mehr als 200)
         ads_url = f"https://graph.facebook.com/v21.0/act_{ad_account_id}/ads"
         params = {
-            "fields": "id,name,status,creative",
-            "limit": 200,
+            "fields": "id,name,status,creative,created_time",
+            "limit": 500,  # Mehr Ads laden
             "access_token": token
         }
         
-        response = requests.get(ads_url, params=params, timeout=30)
-        if response.status_code != 200:
-            error = response.json().get("error", {}).get("message", "Unknown error")
-            return ({}, f"Ads API Error: {error}")
+        all_ads = []
+        while ads_url:
+            response = requests.get(ads_url, params=params, timeout=30)
+            if response.status_code != 200:
+                error = response.json().get("error", {}).get("message", "Unknown error")
+                return ({}, f"Ads API Error: {error}")
+            
+            result = response.json()
+            all_ads.extend(result.get("data", []))
+            
+            # Pagination - nächste Seite
+            ads_url = result.get("paging", {}).get("next")
+            params = {}  # URL enthält bereits alle Parameter
+            
+            # Sicherheitslimit
+            if len(all_ads) >= 2000:
+                break
         
-        ads_data = response.json().get("data", [])
+        ads_data = all_ads
         debug_info.append(f"Ads: {len(ads_data)}")
         
         # Sammle Creative IDs mit Ad-Namen
