@@ -1304,6 +1304,13 @@ Sentiment: {sentiment}
                 if not comment_df.empty:
                     comment = comment_df.iloc[0]
                     
+                    # Auffälliger Container für den Antwort-Dialog
+                    st.markdown("""
+                    <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+                                padding: 1px; border-radius: 10px; margin-bottom: 1rem;">
+                        <div style="background: #0e1117; border-radius: 9px; padding: 1rem;">
+                    """, unsafe_allow_html=True)
+                    
                     st.markdown("### 💬 Antwort schreiben")
                     
                     sentiment = comment.get('sentiment', 'neutral')
@@ -1381,6 +1388,8 @@ Sentiment: {sentiment}
                                 del st.session_state[reply_key]
                             st.rerun()
                     
+                    # Container schließen
+                    st.markdown("</div></div>", unsafe_allow_html=True)
                     st.divider()
             except Exception as e:
                 st.error(f"Fehler: {e}")
