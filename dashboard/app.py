@@ -219,17 +219,28 @@ def load_message_content(message_id: str) -> str:
             
             # Prüfe auf Text
             message = data.get("message", "")
-            if message:
-                return message
             
             # Prüfe auf Story-Reply
             story = data.get("story", {})
             if story:
-                reply_link = story.get("reply_to", {}).get("link", "")
-                if reply_link:
-                    return f"📸 Story-Antwort: [Story anzeigen]({reply_link})"
+                reply_to = story.get("reply_to", {})
+                story_link = reply_to.get("link", "")
+                
+                if message and story_link:
+                    # Story-Reply MIT Text - beides anzeigen
+                    return f"📸 \"{message}\" [Story ansehen]({story_link})"
+                elif message:
+                    # Nur Text (Story abgelaufen)
+                    return f"📸 \"{message}\" (Story abgelaufen)"
+                elif story_link:
+                    # Nur Story-Link (Quick-Reaction ohne Text)
+                    return f"📸 [Story-Reaktion ansehen]({story_link})"
                 else:
                     return "📸 Story-Antwort (Story abgelaufen)"
+            
+            # Normaler Text ohne Story
+            if message:
+                return message
             
             # Prüfe auf Attachments
             attachments = data.get("attachments", {}).get("data", [])
@@ -264,9 +275,9 @@ def load_message_content(message_id: str) -> str:
             
             # Bekannte Fehler mit freundlicher Meldung
             if "Unsupported get request" in error_msg:
-                return "📨 Bild/Video/Story (nicht mehr abrufbar)"
+                return "📨 Ältere Nachricht (nicht mehr abrufbar)"
             
-            return f"⚠️ Nicht abrufbar"
+            return "⚠️ Nicht abrufbar"
             
     except Exception as e:
         return "⚠️ Laden fehlgeschlagen"
