@@ -1292,108 +1292,6 @@ Sentiment: {sentiment}
             key="comment_filter"
         )
         
-        # === ANTWORT-DIALOG (ganz oben, prominent) ===
-        if st.session_state.get('selected_comment_id'):
-            selected_id = st.session_state.selected_comment_id
-            try:
-                comment_df = client.query(f"""
-                SELECT * FROM `root-slate-454410-u0.instagram_messages.ad_comments`
-                WHERE comment_id = '{selected_id}'
-                """).to_dataframe()
-                
-                if not comment_df.empty:
-                    comment = comment_df.iloc[0]
-                    
-                    # Auffälliger Container für den Antwort-Dialog
-                    st.markdown("""
-                    <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
-                                padding: 1px; border-radius: 10px; margin-bottom: 1rem;">
-                        <div style="background: #0e1117; border-radius: 9px; padding: 1rem;">
-                    """, unsafe_allow_html=True)
-                    
-                    st.markdown("### 💬 Antwort schreiben")
-                    
-                    sentiment = comment.get('sentiment', 'neutral')
-                    icon = "🔴" if sentiment == 'negative' else ("🟡" if sentiment == 'question' else "🟢")
-                    
-                    st.markdown(f"**{icon} {comment.get('commenter_name', 'Unbekannt')}:** {comment.get('comment_text', '')}")
-                    st.caption(f"Ad: {comment.get('ad_name', 'Unbekannt') or 'Unbekannt'}")
-                    
-                    # KI Vorschlag
-                    reply_key = f"comment_reply_{selected_id}"
-                    if reply_key not in st.session_state:
-                        with st.spinner("✨ KI generiert Antwort..."):
-                            st.session_state[reply_key] = generate_comment_reply(
-                                comment.get('comment_text', ''),
-                                sentiment,
-                                comment.get('commenter_name', 'Nutzer')
-                            )
-                    
-                    reply_text = st.text_area("Antwort", height=100, key=reply_key)
-                    
-                    col1, col2, col3, col4 = st.columns(4)
-                    
-                    with col1:
-                        if st.button("📤 Auf Instagram antworten", type="primary", key="send_comment"):
-                            # Echte Antwort auf Instagram senden
-                            success, msg = reply_to_comment(selected_id, reply_text)
-                            if success:
-                                # In DB speichern
-                                escaped_reply = reply_text.replace("'", "''")
-                                escaped_id = selected_id.replace("'", "''")
-                                user_kuerzel = st.session_state.get('user_kuerzel', 'XX')
-                                client.query(f"""
-                                UPDATE `root-slate-454410-u0.instagram_messages.ad_comments`
-                                SET response_text = '{escaped_reply}', 
-                                    responded_at = CURRENT_TIMESTAMP(),
-                                    responded_by = '{user_kuerzel}'
-                                WHERE comment_id = '{escaped_id}'
-                                """).result()
-                                st.success(f"✅ Antwort gesendet! ({user_kuerzel})")
-                                st.session_state.selected_comment_id = None
-                                if reply_key in st.session_state:
-                                    del st.session_state[reply_key]
-                                st.rerun()
-                            else:
-                                st.error(f"❌ {msg}")
-                    
-                    with col2:
-                        if st.button("💾 Nur speichern", key="save_comment"):
-                            escaped_reply = reply_text.replace("'", "''")
-                            escaped_id = selected_id.replace("'", "''")
-                            user_kuerzel = st.session_state.get('user_kuerzel', 'XX')
-                            client.query(f"""
-                            UPDATE `root-slate-454410-u0.instagram_messages.ad_comments`
-                            SET response_text = '{escaped_reply}', 
-                                responded_at = CURRENT_TIMESTAMP(),
-                                responded_by = '{user_kuerzel}'
-                            WHERE comment_id = '{escaped_id}'
-                            """).result()
-                            st.success("✅ Gespeichert (nicht gesendet)")
-                            st.session_state.selected_comment_id = None
-                            if reply_key in st.session_state:
-                                del st.session_state[reply_key]
-                            st.rerun()
-                    
-                    with col3:
-                        if st.button("🔄 Neu generieren", key="regen_comment"):
-                            if reply_key in st.session_state:
-                                del st.session_state[reply_key]
-                            st.rerun()
-                    
-                    with col4:
-                        if st.button("❌ Abbrechen", key="cancel_comment"):
-                            st.session_state.selected_comment_id = None
-                            if reply_key in st.session_state:
-                                del st.session_state[reply_key]
-                            st.rerun()
-                    
-                    # Container schließen
-                    st.markdown("</div></div>", unsafe_allow_html=True)
-                    st.divider()
-            except Exception as e:
-                st.error(f"Fehler: {e}")
-        
         # Kommentare laden (nur Ads)
         try:
             # Filter anwenden - nur Ad-Kommentare
@@ -1511,24 +1409,8 @@ Sentiment: {sentiment}
                                     st.rerun()
                         
                         with col4:
-                            # Like-Button
-                            if not is_liked:
-                                if st.button("❤️ Like", key=f"like_c_{idx}"):
-                                    comment_id = comment['comment_id']
-                                    success, msg = like_comment(comment_id)
-                                    if success:
-                                        escaped_id = comment_id.replace("'", "''")
-                                        client.query(f"""
-                                        UPDATE `root-slate-454410-u0.instagram_messages.ad_comments`
-                                        SET is_liked = TRUE
-                                        WHERE comment_id = '{escaped_id}'
-                                        """).result()
-                                        st.success("Geliked!")
-                                        st.rerun()
-                                    else:
-                                        st.error(f"Like fehlgeschlagen: {msg}")
-                            else:
-                                st.write("❤️")
+                            # Like-Button (deaktiviert - API Permission fehlt noch)
+                            st.button("🤍", key=f"like_c_{idx}", disabled=True, help="Like-Funktion noch nicht verfügbar (API Permission ausstehend)")
                         
                         with col5:
                             # Ausblenden (nur im Dashboard, nicht bei Meta!)
@@ -1540,6 +1422,87 @@ Sentiment: {sentiment}
                                 WHERE comment_id = '{escaped_id}'
                                 """).result()
                                 st.rerun()
+                        
+                        # === INLINE ANTWORT-DIALOG (direkt unter diesem Kommentar) ===
+                        current_comment_id = comment['comment_id']
+                        if st.session_state.get('selected_comment_id') == current_comment_id:
+                            st.markdown("""
+                            <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+                                        padding: 2px; border-radius: 10px; margin: 0.5rem 0;">
+                                <div style="background: #1a1a2e; border-radius: 8px; padding: 1rem;">
+                            """, unsafe_allow_html=True)
+                            
+                            # KI Vorschlag generieren
+                            reply_key = f"comment_reply_{current_comment_id}"
+                            comment_sentiment = comment.get('sentiment', 'neutral')
+                            if reply_key not in st.session_state:
+                                with st.spinner("✨ KI generiert Antwort..."):
+                                    st.session_state[reply_key] = generate_comment_reply(
+                                        comment.get('comment_text', ''),
+                                        comment_sentiment,
+                                        comment.get('commenter_name', 'Nutzer')
+                                    )
+                            
+                            reply_text = st.text_area("💬 Antwort schreiben:", height=80, key=reply_key)
+                            
+                            btn_col1, btn_col2, btn_col3, btn_col4 = st.columns(4)
+                            
+                            with btn_col1:
+                                if st.button("📤 Senden", type="primary", key=f"send_{idx}"):
+                                    success, msg = reply_to_comment(current_comment_id, reply_text)
+                                    if success:
+                                        escaped_reply = reply_text.replace("'", "''")
+                                        escaped_id = current_comment_id.replace("'", "''")
+                                        user_kuerzel = st.session_state.get('user_kuerzel', 'XX')
+                                        client.query(f"""
+                                        UPDATE `root-slate-454410-u0.instagram_messages.ad_comments`
+                                        SET response_text = '{escaped_reply}', 
+                                            responded_at = CURRENT_TIMESTAMP(),
+                                            responded_by = '{user_kuerzel}',
+                                            has_our_reply = TRUE,
+                                            our_reply_text = '{escaped_reply}'
+                                        WHERE comment_id = '{escaped_id}'
+                                        """).result()
+                                        st.success(f"✅ Gesendet!")
+                                        st.session_state.selected_comment_id = None
+                                        if reply_key in st.session_state:
+                                            del st.session_state[reply_key]
+                                        st.rerun()
+                                    else:
+                                        st.error(f"❌ {msg}")
+                            
+                            with btn_col2:
+                                if st.button("💾 Speichern", key=f"save_{idx}"):
+                                    escaped_reply = reply_text.replace("'", "''")
+                                    escaped_id = current_comment_id.replace("'", "''")
+                                    user_kuerzel = st.session_state.get('user_kuerzel', 'XX')
+                                    client.query(f"""
+                                    UPDATE `root-slate-454410-u0.instagram_messages.ad_comments`
+                                    SET response_text = '{escaped_reply}', 
+                                        responded_at = CURRENT_TIMESTAMP(),
+                                        responded_by = '{user_kuerzel}'
+                                    WHERE comment_id = '{escaped_id}'
+                                    """).result()
+                                    st.success("✅ Gespeichert")
+                                    st.session_state.selected_comment_id = None
+                                    if reply_key in st.session_state:
+                                        del st.session_state[reply_key]
+                                    st.rerun()
+                            
+                            with btn_col3:
+                                if st.button("🔄 Neu", key=f"regen_{idx}"):
+                                    if reply_key in st.session_state:
+                                        del st.session_state[reply_key]
+                                    st.rerun()
+                            
+                            with btn_col4:
+                                if st.button("❌ Abbrechen", key=f"cancel_{idx}"):
+                                    st.session_state.selected_comment_id = None
+                                    if reply_key in st.session_state:
+                                        del st.session_state[reply_key]
+                                    st.rerun()
+                            
+                            st.markdown("</div></div>", unsafe_allow_html=True)
                         
                         st.divider()
             else:
