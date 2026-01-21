@@ -118,18 +118,20 @@ def get_ad_account_id():
     return st.secrets.get("AD_ACCOUNT_ID", os.getenv("AD_ACCOUNT_ID", "1266832358443930"))
 
 @st.cache_data(ttl=300)  # Cache for 5 minutes
-def load_active_ad_shortcodes() -> tuple:
-    """Lädt alle Shortcodes von aktiven Ads (cached)"""
+def load_ad_media_ids() -> tuple:
+    """Lädt Instagram Media IDs direkt von den Ad Creatives (für Dark Posts)
+    Returns: (dict of media_id -> ad_info, debug_info)
+    """
     token = get_page_access_token()
     if not token:
-        return (set(), "Kein Token")
+        return ({}, "Kein Token")
     
-    ad_shortcodes = set()
+    ad_media = {}  # media_id -> {"ad_name": ..., "shortcode": ...}
     ad_account_id = get_ad_account_id()
     debug_info = []
     
     try:
-        # Lade alle Ads (aktive + pausierte, da pausierte Ads trotzdem Kommentare haben können)
+        # Lade alle Ads
         ads_url = f"https://graph.facebook.com/v21.0/act_{ad_account_id}/ads"
         params = {
             "fields": "id,name,status,creative",
@@ -140,21 +142,22 @@ def load_active_ad_shortcodes() -> tuple:
         response = requests.get(ads_url, params=params, timeout=30)
         if response.status_code != 200:
             error = response.json().get("error", {}).get("message", "Unknown error")
-            return (set(), f"Ads API Error: {error}")
+            return ({}, f"Ads API Error: {error}")
         
         ads_data = response.json().get("data", [])
-        debug_info.append(f"Gefunden: {len(ads_data)} Ads")
+        debug_info.append(f"Ads: {len(ads_data)}")
         
-        # Sammle alle Creative IDs
-        creative_ids = []
+        # Sammle Creative IDs mit Ad-Namen
+        creative_to_ad = {}  # creative_id -> ad_name
         for ad in ads_data:
             creative_id = ad.get("creative", {}).get("id")
             if creative_id:
-                creative_ids.append(creative_id)
+                creative_to_ad[creative_id] = ad.get("name", "Unbekannte Ad")
         
-        debug_info.append(f"Creatives zu laden: {len(creative_ids)}")
+        debug_info.append(f"Creatives: {len(creative_to_ad)}")
         
-        # Batch-Request für Creatives (max 50 pro Batch)
+        # Batch-Request für Creatives - hole effective_instagram_media_id
+        creative_ids = list(creative_to_ad.keys())
         for i in range(0, len(creative_ids), 50):
             batch_ids = creative_ids[i:i+50]
             ids_param = ",".join(batch_ids)
@@ -162,7 +165,7 @@ def load_active_ad_shortcodes() -> tuple:
             creative_url = f"https://graph.facebook.com/v21.0/"
             creative_params = {
                 "ids": ids_param,
-                "fields": "id,instagram_permalink_url",
+                "fields": "id,effective_instagram_media_id,instagram_permalink_url",
                 "access_token": token
             }
             
@@ -170,22 +173,29 @@ def load_active_ad_shortcodes() -> tuple:
             if creative_response.status_code == 200:
                 creatives_data = creative_response.json()
                 for creative_id, creative_info in creatives_data.items():
+                    media_id = creative_info.get("effective_instagram_media_id")
                     permalink = creative_info.get("instagram_permalink_url", "")
-                    if permalink:
+                    
+                    if media_id:
                         # Extrahiere Shortcode aus URL
+                        shortcode = ""
                         if "/p/" in permalink:
                             shortcode = permalink.split("/p/")[1].split("/")[0].split("?")[0]
-                            ad_shortcodes.add(shortcode)
                         elif "/reel/" in permalink:
                             shortcode = permalink.split("/reel/")[1].split("/")[0].split("?")[0]
-                            ad_shortcodes.add(shortcode)
+                        
+                        ad_media[media_id] = {
+                            "ad_name": creative_to_ad.get(creative_id, ""),
+                            "shortcode": shortcode,
+                            "permalink": permalink
+                        }
         
-        debug_info.append(f"Ad-Shortcodes gefunden: {len(ad_shortcodes)}")
+        debug_info.append(f"Media IDs: {len(ad_media)}")
         
     except Exception as e:
         debug_info.append(f"Error: {str(e)}")
     
-    return (ad_shortcodes, " | ".join(debug_info))
+    return (ad_media, " | ".join(debug_info))
 
 def load_instagram_posts(limit: int = 20) -> list:
     """Lädt Instagram Posts mit Kommentar-Anzahl"""
@@ -300,7 +310,7 @@ def ensure_comments_table_schema():
             pass
 
 def sync_instagram_comments():
-    """Synchronisiert NUR Ad-Kommentare mit BigQuery (keine normalen Posts)
+    """Synchronisiert Ad-Kommentare direkt von den Ad Media IDs
     Returns: (new_count, synced_count, debug_info)
     """
     client = get_bq_client()
@@ -309,51 +319,30 @@ def sync_instagram_comments():
     # Schema sicherstellen
     ensure_comments_table_schema()
     
-    # 1. Lade Ad Shortcodes (cached)
-    ad_shortcodes, ads_debug = load_active_ad_shortcodes()
-    debug_messages.append(f"Ads: {ads_debug}")
+    # 1. Lade Ad Media IDs direkt (funktioniert auch für Dark Posts)
+    ad_media, ads_debug = load_ad_media_ids()
+    debug_messages.append(ads_debug)
     
-    if not ad_shortcodes:
-        debug_messages.append("Keine Ad-Shortcodes gefunden - Sync abgebrochen")
+    if not ad_media:
+        debug_messages.append("Keine Ad Media IDs gefunden - Sync abgebrochen")
         return 0, 0, " | ".join(debug_messages)
-    
-    # 2. Lade Posts (mehr laden um ältere Ad-Posts zu finden)
-    posts = load_instagram_posts(limit=100)
-    debug_messages.append(f"Posts geladen: {len(posts)}")
-    
-    # Debug: Zeige einige Shortcodes zum Vergleich
-    post_shortcodes = set(p.get("shortcode", "") for p in posts if p.get("shortcode"))
-    matching = ad_shortcodes.intersection(post_shortcodes)
-    debug_messages.append(f"Shortcode-Matches: {len(matching)}")
-    
-    # Zeige ein paar Beispiele falls keine Matches
-    if not matching and ad_shortcodes and post_shortcodes:
-        ad_examples = list(ad_shortcodes)[:3]
-        post_examples = list(post_shortcodes)[:3]
-        debug_messages.append(f"Ad-Shortcodes (Beispiele): {ad_examples}")
-        debug_messages.append(f"Post-Shortcodes (Beispiele): {post_examples}")
     
     synced_count = 0
     new_count = 0
-    ad_posts_found = 0
+    ads_with_comments = 0
     
-    for post in posts:
-        shortcode = post.get("shortcode", "")
+    # 2. Für jede Ad Media ID: Kommentare laden
+    for media_id, ad_info in ad_media.items():
+        # Lade Kommentare für diese Ad
+        comments = load_post_comments(media_id, limit=100)
         
-        # NUR Ad-Posts verarbeiten - normale Posts ignorieren
-        if shortcode not in ad_shortcodes:
+        if not comments:
             continue
         
-        if post.get("comments_count", 0) == 0:
-            continue
-        
-        ad_posts_found += 1
-        post_id = post["id"]
-        post_type = "ad"  # Immer "ad" da wir nur Ads laden
-        caption = (post.get("caption", "") or "")[:200]
-        
-        # Lade Kommentare für diesen Ad-Post
-        comments = load_post_comments(post_id, limit=100)
+        ads_with_comments += 1
+        shortcode = ad_info.get("shortcode", "")
+        ad_name = ad_info.get("ad_name", "")[:200]
+        post_type = "ad"
         
         for comment in comments:
             comment_id = comment.get("id", "")
@@ -389,10 +378,10 @@ def sync_instagram_comments():
              comment_text, created_at, sentiment, status, is_hidden, is_deleted, priority)
             VALUES (
                 '{comment_id}',
-                '{post_id}',
+                '{media_id}',
                 '{shortcode}',
                 '{post_type}',
-                '{caption.replace("'", "''")}',
+                '{ad_name.replace("'", "''")}',
                 '{commenter_id}',
                 '{username.replace("'", "''")}',
                 '{comment_text.replace("'", "''")}',
@@ -412,7 +401,7 @@ def sync_instagram_comments():
         
         synced_count += len(comments)
     
-    debug_messages.append(f"Posts mit Ads: {ad_posts_found}")
+    debug_messages.append(f"Ads mit Kommentaren: {ads_with_comments}")
     debug_messages.append(f"Neue Kommentare: {new_count}")
     
     return new_count, synced_count, " | ".join(debug_messages)
@@ -1142,7 +1131,7 @@ def main():
                             'debug': debug_info
                         }
                         # Cache leeren damit neue Daten geladen werden
-                        load_active_ad_shortcodes.clear()
+                        load_ad_media_ids.clear()
                         st.rerun()
                     except Exception as e:
                         st.error(f"Fehler beim Sync: {e}")
