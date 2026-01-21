@@ -303,6 +303,7 @@ def ensure_comments_table_schema():
         "ALTER TABLE `root-slate-454410-u0.instagram_messages.ad_comments` ADD COLUMN IF NOT EXISTS has_our_reply BOOL",
         "ALTER TABLE `root-slate-454410-u0.instagram_messages.ad_comments` ADD COLUMN IF NOT EXISTS our_reply_text STRING",
         "ALTER TABLE `root-slate-454410-u0.instagram_messages.ad_comments` ADD COLUMN IF NOT EXISTS is_done BOOL",
+        "ALTER TABLE `root-slate-454410-u0.instagram_messages.ad_comments` ADD COLUMN IF NOT EXISTS replies_json STRING",
     ]
     
     for query in alter_queries:
@@ -364,13 +365,29 @@ def sync_instagram_comments():
             has_our_reply = False
             our_reply_text = ""
             replies = comment.get("replies", {}).get("data", [])
+            
+            # Alle Replies als JSON speichern
+            replies_list = []
             for reply in replies:
                 reply_from_id = reply.get("from", {}).get("id", "")
+                reply_username = reply.get("username", "") or reply.get("from", {}).get("username", "")
+                reply_text = reply.get("text", "")
+                reply_timestamp = reply.get("timestamp", "")
+                
+                replies_list.append({
+                    "id": reply.get("id", ""),
+                    "username": reply_username,
+                    "text": reply_text,
+                    "timestamp": reply_timestamp,
+                    "is_own": reply_from_id == own_ig_id
+                })
+                
                 # Prüfe ob Reply von uns ist (eigene IG Account ID)
-                if reply_from_id == own_ig_id:
+                if reply_from_id == own_ig_id and not has_our_reply:
                     has_our_reply = True
-                    our_reply_text = reply.get("text", "")[:500]  # Erste Antwort speichern
-                    break
+                    our_reply_text = reply_text[:500]
+            
+            replies_json = json.dumps(replies_list) if replies_list else ""
             
             # Prüfe ob Kommentar bereits existiert
             check_query = f"""
@@ -380,17 +397,18 @@ def sync_instagram_comments():
             try:
                 existing = client.query(check_query).to_dataframe()
                 if not existing.empty:
-                    # Update falls Reply-Status sich geändert hat
-                    if has_our_reply:
-                        update_query = f"""
-                        UPDATE `root-slate-454410-u0.instagram_messages.ad_comments`
-                        SET has_our_reply = TRUE, our_reply_text = '{our_reply_text.replace("'", "''")}'
-                        WHERE comment_id = '{comment_id}'
-                        """
-                        try:
-                            client.query(update_query).result()
-                        except:
-                            pass
+                    # Update Replies (immer aktualisieren für neue Antworten)
+                    update_query = f"""
+                    UPDATE `root-slate-454410-u0.instagram_messages.ad_comments`
+                    SET has_our_reply = {has_our_reply}, 
+                        our_reply_text = '{our_reply_text.replace("'", "''")}',
+                        replies_json = '{replies_json.replace("'", "''")}'
+                    WHERE comment_id = '{comment_id}'
+                    """
+                    try:
+                        client.query(update_query).result()
+                    except:
+                        pass
                     synced_count += 1
                     continue
             except:
@@ -405,7 +423,7 @@ def sync_instagram_comments():
             INSERT INTO `root-slate-454410-u0.instagram_messages.ad_comments`
             (comment_id, post_id, post_shortcode, post_type, ad_name, commenter_id, commenter_name, 
              comment_text, created_at, sentiment, status, is_hidden, is_deleted, priority,
-             has_our_reply, our_reply_text, is_done)
+             has_our_reply, our_reply_text, is_done, replies_json)
             VALUES (
                 '{comment_id}',
                 '{media_id}',
@@ -423,7 +441,8 @@ def sync_instagram_comments():
                 '{priority}',
                 {has_our_reply},
                 '{our_reply_text.replace("'", "''")}',
-                FALSE
+                FALSE,
+                '{replies_json.replace("'", "''")}'
             )
             """
             try:
@@ -1399,8 +1418,26 @@ Sentiment: {sentiment}
                             st.markdown(f"**{sentiment_icon} {comment.get('commenter_name', 'Unbekannt')}**")
                             st.write(comment.get('comment_text', ''))
                             
-                            # Zeige bestehende Antwort
-                            if has_our_reply and our_reply_text:
+                            # Zeige ALLE Replies
+                            replies_json_str = comment.get('replies_json', '') or ''
+                            if replies_json_str:
+                                try:
+                                    replies_list = json.loads(replies_json_str)
+                                    if replies_list:
+                                        for reply in replies_list:
+                                            reply_user = reply.get('username', 'Unbekannt')
+                                            reply_text = reply.get('text', '')
+                                            is_own = reply.get('is_own', False)
+                                            
+                                            if is_own:
+                                                st.caption(f"↳ **{reply_user}** (ihr): {reply_text}")
+                                            else:
+                                                st.caption(f"↳ {reply_user}: {reply_text}")
+                                except:
+                                    # Fallback auf altes Format
+                                    if has_our_reply and our_reply_text:
+                                        st.caption(f"↳ Eure Antwort (Instagram): {our_reply_text}")
+                            elif has_our_reply and our_reply_text:
                                 st.caption(f"↳ Eure Antwort (Instagram): {our_reply_text}")
                             elif has_manual_response:
                                 st.caption(f"↳ Eure Antwort: {response_text}")
