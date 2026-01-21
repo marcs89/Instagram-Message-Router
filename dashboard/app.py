@@ -1244,9 +1244,7 @@ Sentiment: {sentiment}
             key="comment_filter"
         )
         
-        st.divider()
-        
-        # Antwort-Dialog wenn Kommentar ausgewählt
+        # === ANTWORT-DIALOG (ganz oben, prominent) ===
         if st.session_state.get('selected_comment_id'):
             selected_id = st.session_state.selected_comment_id
             try:
@@ -1416,7 +1414,7 @@ Sentiment: {sentiment}
                         with col2:
                             # Antwort-Button (nur wenn noch nicht beantwortet)
                             if not has_our_reply and not has_manual_response:
-                                if st.button("💬", key=f"reply_c_{idx}", help="Antworten"):
+                                if st.button("💬 Antworten", key=f"reply_c_{idx}"):
                                     st.session_state.selected_comment_id = comment['comment_id']
                                     st.rerun()
                             else:
@@ -1425,7 +1423,7 @@ Sentiment: {sentiment}
                         with col3:
                             # Erledigt-Button (nur wenn noch nicht erledigt)
                             if not is_processed:
-                                if st.button("✓", key=f"done_c_{idx}", help="Als erledigt markieren"):
+                                if st.button("✓ Erledigt", key=f"done_c_{idx}"):
                                     escaped_id = comment['comment_id'].replace("'", "''")
                                     client.query(f"""
                                     UPDATE `root-slate-454410-u0.instagram_messages.ad_comments`
@@ -1435,8 +1433,8 @@ Sentiment: {sentiment}
                                     st.rerun()
                         
                         with col4:
-                            # Löschen (verstecken)
-                            if st.button("🗑️", key=f"del_c_{idx}", help="Ausblenden"):
+                            # Ausblenden (nur im Dashboard, nicht bei Meta!)
+                            if st.button("👁️ Ausblenden", key=f"hide_c_{idx}", help="Nur im Dashboard ausblenden"):
                                 escaped_id = comment['comment_id'].replace("'", "''")
                                 client.query(f"""
                                 UPDATE `root-slate-454410-u0.instagram_messages.ad_comments`
