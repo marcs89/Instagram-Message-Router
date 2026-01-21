@@ -31,22 +31,27 @@ if not os.getenv("GEMINI_API_KEY"):
 
 # Instagram API Functions
 def get_page_access_token():
-    """Get Page Access Token from secrets or env"""
+    """Get Page Access Token from secrets or env (for Ads, Comments)"""
     return st.secrets.get("PAGE_ACCESS_TOKEN", os.getenv("PAGE_ACCESS_TOKEN", ""))
 
+def get_instagram_access_token():
+    """Get Instagram Access Token from secrets or env (for DMs, User Info)"""
+    return st.secrets.get("INSTAGRAM_ACCESS_TOKEN", os.getenv("INSTAGRAM_ACCESS_TOKEN", ""))
+
 def get_instagram_user_info(user_id: str) -> dict:
-    """Fetch Instagram user info (username, name) via Graph API"""
+    """Fetch Instagram user info (username, name) via Instagram Graph API"""
     # Skip API call for demo/test users
     if user_id.startswith("demo_") or user_id.startswith("test_"):
         return {"username": user_id, "name": "", "error": None}
     
-    token = get_page_access_token()
+    # Use Instagram Token (IGAAT...) for user lookups
+    token = get_instagram_access_token()
     if not token:
-        return {"username": "", "name": "", "error": "No token"}
+        return {"username": "", "name": "", "error": "No Instagram token"}
     
     try:
-        # Versuche zuerst mit username,name
-        url = f"https://graph.facebook.com/v21.0/{user_id}"
+        # Instagram Graph API endpoint
+        url = f"https://graph.instagram.com/v21.0/{user_id}"
         params = {
             "fields": "username,name",
             "access_token": token
@@ -61,30 +66,16 @@ def get_instagram_user_info(user_id: str) -> dict:
                 "error": None
             }
         
-        # Fallback: Versuche nur 'name' (manchmal ist username nicht verfügbar)
-        params["fields"] = "name"
-        response = requests.get(url, params=params, timeout=5)
-        data = response.json()
-        
-        if response.status_code == 200 and "error" not in data:
-            return {
-                "username": "",
-                "name": data.get("name", ""),
-                "error": None
-            }
-        
         # Return error info for debugging
         error_msg = data.get("error", {}).get("message", "Unknown error")
         return {"username": "", "name": "", "error": error_msg}
         
     except Exception as e:
         return {"username": "", "name": "", "error": str(e)}
-    
-    return {"username": "", "name": "", "error": "Unknown"}
 
-@st.cache_data(ttl=300)  # 5 min cache for debugging
+@st.cache_data(ttl=3600)  # 1 hour cache
 def get_cached_user_info(user_id: str) -> dict:
-    """Cached version of user info lookup"""
+    """Cached version of user info lookup via Instagram API"""
     return get_instagram_user_info(user_id)
 
 def get_instagram_account_id():
@@ -899,14 +890,12 @@ def render_chat_view(sender_id: str, auto_refresh_chat: bool = False):
         st.info("Keine Nachrichten")
         return
     
-    # Get username from DB (API requires Advanced Access which we don't have)
+    # Get username from Instagram API (using Instagram Token)
+    user_info = get_cached_user_info(sender_id)
     db_name = messages.iloc[0].get('sender_name', '') or ''
-    # Fallback: DB name > formatted sender_id
-    if db_name and db_name != sender_id:
-        sender_name = db_name
-    else:
-        # Formatiere die ID lesbarer
-        sender_name = f"Kunde #{sender_id[-6:]}"
+    api_username = user_info.get('username', '') or ''
+    # Fallback chain: API username > DB name > formatted ID
+    sender_name = api_username or db_name or f"Kunde #{sender_id[-6:]}"
     last_msg = messages.iloc[-1]
     
     # Header with optional auto-refresh for chat messages only
@@ -1197,12 +1186,12 @@ def main():
             else:
                 for _, conv in conversations.iterrows():
                     sender_id = conv['sender_id']
+                    # Get username via Instagram API (now works with IG token!)
+                    user_info = get_cached_user_info(sender_id)
+                    api_username = user_info.get('username', '') or ''
                     db_name = conv.get('sender_name', '') or ''
-                    # Use: DB name > formatted ID (API needs Advanced Access)
-                    if db_name and db_name != sender_id:
-                        sender_name = db_name
-                    else:
-                        sender_name = f"Kunde #{sender_id[-6:]}"
+                    # Use: API username > DB name > formatted ID
+                    sender_name = api_username or db_name or f"Kunde #{sender_id[-6:]}"
                     has_unanswered = conv.get('has_unanswered', 0)
                     last_message = conv.get('last_message', '')[:50] + "..." if conv.get('last_message') else ""
                     tags = conv.get('tags', '') or ''
