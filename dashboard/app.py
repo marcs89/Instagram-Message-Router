@@ -186,7 +186,8 @@ def load_conversation_messages(conversation_id: str, limit: int = 50) -> list:
     try:
         url = f"https://graph.instagram.com/v21.0/{conversation_id}"
         params = {
-            "fields": "messages{id,message,created_time,from}",
+            # Lade auch story und attachments um Reaktionen zu erkennen
+            "fields": "messages{id,message,created_time,from,story,attachments}",
             "access_token": token
         }
         
@@ -316,14 +317,22 @@ def sync_conversation_history(sender_id: str, conversation_id: str = None) -> tu
     own_ig_id = get_instagram_account_id() or get_own_instagram_id()
     
     new_count = 0
+    skipped_reactions = 0
     for msg in messages:
         msg_id = msg.get("id", "")
         msg_text = msg.get("message", "")
         created_time = msg.get("created_time", "")
         from_id = msg.get("from", {}).get("id", "")
         from_username = msg.get("from", {}).get("username", "")
+        has_story = bool(msg.get("story", {}))
+        has_attachments = bool(msg.get("attachments", {}).get("data", []))
         
         if not msg_id:
+            continue
+        
+        # Überspringe reine Reaktionen (kein Text, kein Attachment, nur Story-Reaktion)
+        if not msg_text.strip() and has_story and not has_attachments:
+            skipped_reactions += 1
             continue
         
         # Prüfe ob schon existiert
@@ -1352,32 +1361,8 @@ def render_chat_view(sender_id: str, auto_refresh_chat: bool = False):
                     <div class="message-time">✓ {time_str}</div>
                 </div>
                 """, unsafe_allow_html=True)
-            # Leere ausgehende Nachrichten (z.B. nur Bild gesendet) - optional anzeigen
-            elif not response:  # Nur wenn noch keine response_text angezeigt wurde
-                msg_id = msg.get('message_id', '')
-                attachment_key = f"attachment_{msg_id}"
-                if attachment_key in st.session_state:
-                    att_info = st.session_state[attachment_key]
-                    st.markdown(f"""
-                    <div class="message-outgoing">
-                        <div>{att_info}</div>
-                        <div class="message-time">✓ {time_str}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                else:
-                    col_msg, col_btn = st.columns([4, 1])
-                    with col_msg:
-                        st.markdown(f"""
-                        <div class="message-outgoing" style="opacity: 0.6;">
-                            <div><em>[Medien gesendet]</em></div>
-                            <div class="message-time">✓ {time_str}</div>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    with col_btn:
-                        if st.button("👁️", key=f"load_att_{msg_id}", help="Inhalt laden"):
-                            att_info = load_message_content(msg_id)
-                            st.session_state[attachment_key] = att_info
-                            st.rerun()
+            # Leere ausgehende Nachrichten werden übersprungen
+            # (Reine Reaktionen oder alte nicht-abrufbare Medien)
         
         # Eingehende Nachricht (vom Kunden)
         elif direction == 'incoming':
@@ -1388,35 +1373,8 @@ def render_chat_view(sender_id: str, auto_refresh_chat: bool = False):
                     <div class="message-time">{time_str}</div>
                 </div>
                 """, unsafe_allow_html=True)
-            else:
-                # Leere Nachricht - versuche Attachment-Info zu laden
-                msg_id = msg.get('message_id', '')
-                attachment_key = f"attachment_{msg_id}"
-                
-                # Prüfe ob wir schon Attachment-Info haben
-                if attachment_key in st.session_state:
-                    att_info = st.session_state[attachment_key]
-                    st.markdown(f"""
-                    <div class="message-incoming">
-                        <div>{att_info}</div>
-                        <div class="message-time">{time_str}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                else:
-                    # Zeige Platzhalter mit "Laden" Button
-                    col_msg, col_btn = st.columns([4, 1])
-                    with col_msg:
-                        st.markdown(f"""
-                        <div class="message-incoming" style="opacity: 0.6;">
-                            <div><em>[Medien-Nachricht]</em></div>
-                            <div class="message-time">{time_str}</div>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    with col_btn:
-                        if st.button("👁️", key=f"load_att_{msg_id}", help="Inhalt laden"):
-                            att_info = load_message_content(msg_id)
-                            st.session_state[attachment_key] = att_info
-                            st.rerun()
+            # Leere Nachrichten ohne Text werden übersprungen
+            # (Reine Reaktionen oder alte nicht-abrufbare Medien)
     
     # "Mehr laden" Button unten (falls es ältere Nachrichten in der DB gibt)
     if end_idx < total_messages:
