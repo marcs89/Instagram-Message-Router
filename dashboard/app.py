@@ -1087,53 +1087,89 @@ def get_own_instagram_id():
     """Get our own Instagram Account ID to filter out"""
     return st.secrets.get("INSTAGRAM_ACCOUNT_ID", os.getenv("INSTAGRAM_ACCOUNT_ID", "17841462069085392"))
 
-@st.cache_data(ttl=30)  # Cache for 30 seconds
+@st.cache_data(ttl=15)  # Cache for 15 seconds
 def load_conversations(filter_type: str = "all", filter_tags_str: str = ""):
     """Lädt Konversationen mit Filtern (cached)"""
     client = get_bq_client()
     
     own_id = get_own_instagram_id()
     
-    # Base query - get latest message status per sender
-    # Only check if the LATEST message is unanswered, not all messages
+    # Base query - get conversations with latest activity
+    # A conversation is identified by the customer's ID (not our own)
+    # Check if the latest INCOMING message is unanswered
     query = f"""
-    WITH latest_messages AS (
+    WITH all_conversations AS (
+        -- Get all unique customer IDs (either as sender or recipient)
+        SELECT DISTINCT
+            CASE 
+                WHEN sender_id = '{own_id}' THEN recipient_id
+                ELSE sender_id
+            END as customer_id
+        FROM `root-slate-454410-u0.instagram_messages.messages`
+        WHERE sender_id != '{own_id}' OR recipient_id != '{own_id}'
+    ),
+    conversation_messages AS (
+        -- Get all messages for each conversation
         SELECT 
-            sender_id,
+            CASE 
+                WHEN sender_id = '{own_id}' THEN recipient_id
+                ELSE sender_id
+            END as customer_id,
             sender_name,
             message_text,
             tags,
             response_text,
             received_at,
-            ROW_NUMBER() OVER (PARTITION BY sender_id ORDER BY received_at DESC) as rn
+            direction
         FROM `root-slate-454410-u0.instagram_messages.messages`
-        WHERE sender_id != '{own_id}'
+        WHERE (sender_id != '{own_id}' OR recipient_id != '{own_id}')
           AND sender_id NOT LIKE 'demo_%'
           AND sender_id NOT LIKE 'test_%'
     ),
+    latest_activity AS (
+        -- Get the latest message (any direction) per customer
+        SELECT 
+            customer_id,
+            MAX(received_at) as last_activity_at
+        FROM conversation_messages
+        GROUP BY customer_id
+    ),
+    latest_incoming AS (
+        -- Get the latest INCOMING message per customer (to check if answered)
+        SELECT 
+            customer_id,
+            sender_name,
+            message_text,
+            tags,
+            response_text,
+            received_at,
+            ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY received_at DESC) as rn
+        FROM conversation_messages
+        WHERE direction = 'incoming' OR direction IS NULL
+    ),
     conversation_stats AS (
         SELECT 
-            sender_id,
-            MAX(sender_name) as sender_name,
-            COUNT(*) as message_count,
-            MAX(received_at) as last_message_at
-        FROM `root-slate-454410-u0.instagram_messages.messages`
-        WHERE sender_id != '{own_id}'
-          AND sender_id NOT LIKE 'demo_%'
-          AND sender_id NOT LIKE 'test_%'
-        GROUP BY sender_id
+            customer_id,
+            COUNT(*) as message_count
+        FROM conversation_messages
+        GROUP BY customer_id
     )
     SELECT 
-        cs.sender_id,
-        cs.sender_name,
-        cs.message_count,
-        cs.last_message_at,
-        CASE WHEN lm.response_text IS NULL OR lm.response_text = '' THEN 1 ELSE 0 END as has_unanswered,
-        lm.tags,
-        lm.message_text as last_message
-    FROM conversation_stats cs
-    JOIN latest_messages lm ON cs.sender_id = lm.sender_id AND lm.rn = 1
-    WHERE 1=1
+        ac.customer_id as sender_id,
+        COALESCE(li.sender_name, '') as sender_name,
+        COALESCE(cs.message_count, 0) as message_count,
+        la.last_activity_at as last_message_at,
+        CASE WHEN li.response_text IS NULL OR li.response_text = '' THEN 1 ELSE 0 END as has_unanswered,
+        COALESCE(li.tags, '') as tags,
+        COALESCE(li.message_text, '') as last_message
+    FROM all_conversations ac
+    JOIN latest_activity la ON ac.customer_id = la.customer_id
+    LEFT JOIN latest_incoming li ON ac.customer_id = li.customer_id AND li.rn = 1
+    LEFT JOIN conversation_stats cs ON ac.customer_id = cs.customer_id
+    WHERE ac.customer_id IS NOT NULL
+      AND ac.customer_id != ''
+      AND ac.customer_id NOT LIKE 'demo_%'
+      AND ac.customer_id NOT LIKE 'test_%'
     """
     
     # Apply filters
@@ -1384,7 +1420,12 @@ def render_chat_view(sender_id: str, auto_refresh_chat: bool = False):
     for _, msg in messages_to_show.iterrows():
         received_at = msg.get('received_at', '')
         try:
-            time_str = pd.to_datetime(received_at).strftime('%d.%m. %H:%M')
+            # Konvertiere zu deutscher Zeit (Europe/Berlin)
+            utc_time = pd.to_datetime(received_at)
+            if utc_time.tzinfo is None:
+                utc_time = utc_time.tz_localize('UTC')
+            german_time = utc_time.tz_convert('Europe/Berlin')
+            time_str = german_time.strftime('%d.%m. %H:%M')
         except:
             time_str = ""
         
