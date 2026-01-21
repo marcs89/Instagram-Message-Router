@@ -266,6 +266,34 @@ def reply_to_comment(comment_id: str, message: str) -> tuple[bool, str]:
     except Exception as e:
         return False, f"Fehler: {str(e)}"
 
+def like_comment(comment_id: str) -> tuple[bool, str]:
+    """Liked einen Instagram Kommentar via Graph API"""
+    token = get_page_access_token()
+    
+    if not token:
+        return False, "Kein Page Access Token konfiguriert"
+    
+    try:
+        # Instagram Graph API: POST /{comment-id}/likes
+        url = f"https://graph.facebook.com/v21.0/{comment_id}/likes"
+        params = {
+            "access_token": token
+        }
+        
+        response = requests.post(url, params=params, timeout=10)
+        if response.status_code == 200:
+            result = response.json()
+            if result.get("success", False):
+                return True, "Kommentar geliked"
+            else:
+                return False, "Like nicht erfolgreich"
+        else:
+            error_data = response.json()
+            error_msg = error_data.get("error", {}).get("message", "Unbekannter Fehler")
+            return False, f"API Fehler: {error_msg}"
+    except Exception as e:
+        return False, f"Fehler: {str(e)}"
+
 def analyze_sentiment(text: str) -> str:
     """Einfache Sentiment-Analyse"""
     text_lower = text.lower()
@@ -304,6 +332,7 @@ def ensure_comments_table_schema():
         "ALTER TABLE `root-slate-454410-u0.instagram_messages.ad_comments` ADD COLUMN IF NOT EXISTS our_reply_text STRING",
         "ALTER TABLE `root-slate-454410-u0.instagram_messages.ad_comments` ADD COLUMN IF NOT EXISTS is_done BOOL",
         "ALTER TABLE `root-slate-454410-u0.instagram_messages.ad_comments` ADD COLUMN IF NOT EXISTS replies_json STRING",
+        "ALTER TABLE `root-slate-454410-u0.instagram_messages.ad_comments` ADD COLUMN IF NOT EXISTS is_liked BOOL",
     ]
     
     for query in alter_queries:
@@ -1412,7 +1441,10 @@ Sentiment: {sentiment}
                         if status_parts:
                             st.markdown(" ".join(status_parts), unsafe_allow_html=True)
                         
-                        col1, col2, col3, col4 = st.columns([4, 1, 1, 1])
+                        col1, col2, col3, col4, col5 = st.columns([4, 1, 1, 1, 1])
+                        
+                        # Prüfe ob bereits geliked
+                        is_liked = pd.notna(comment.get('is_liked')) and comment.get('is_liked') == True
                         
                         with col1:
                             st.markdown(f"**{sentiment_icon} {comment.get('commenter_name', 'Unbekannt')}**")
@@ -1470,8 +1502,28 @@ Sentiment: {sentiment}
                                     st.rerun()
                         
                         with col4:
+                            # Like-Button
+                            if not is_liked:
+                                if st.button("❤️ Like", key=f"like_c_{idx}"):
+                                    comment_id = comment['comment_id']
+                                    success, msg = like_comment(comment_id)
+                                    if success:
+                                        escaped_id = comment_id.replace("'", "''")
+                                        client.query(f"""
+                                        UPDATE `root-slate-454410-u0.instagram_messages.ad_comments`
+                                        SET is_liked = TRUE
+                                        WHERE comment_id = '{escaped_id}'
+                                        """).result()
+                                        st.success("Geliked!")
+                                        st.rerun()
+                                    else:
+                                        st.error(f"Like fehlgeschlagen: {msg}")
+                            else:
+                                st.write("❤️")
+                        
+                        with col5:
                             # Ausblenden (nur im Dashboard, nicht bei Meta!)
-                            if st.button("👁️ Ausblenden", key=f"hide_c_{idx}", help="Nur im Dashboard ausblenden"):
+                            if st.button("👁️", key=f"hide_c_{idx}", help="Nur im Dashboard ausblenden"):
                                 escaped_id = comment['comment_id'].replace("'", "''")
                                 client.query(f"""
                                 UPDATE `root-slate-454410-u0.instagram_messages.ad_comments`
