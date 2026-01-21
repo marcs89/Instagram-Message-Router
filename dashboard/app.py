@@ -67,10 +67,8 @@ def get_instagram_user_info(user_id: str) -> dict:
 
 @st.cache_data(ttl=3600)
 def get_cached_user_info(user_id: str) -> dict:
-    """Cached version of user info lookup - disabled until App Review"""
-    # API calls fail without App Review, skip them for now
-    # return get_instagram_user_info(user_id)
-    return {"username": "", "name": ""}
+    """Cached version of user info lookup (1 hour cache)"""
+    return get_instagram_user_info(user_id)
 
 def get_instagram_account_id():
     """Get Instagram Business Account ID from secrets or env"""
