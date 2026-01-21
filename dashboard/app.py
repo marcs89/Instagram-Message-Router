@@ -36,38 +36,55 @@ def get_page_access_token():
 
 def get_instagram_user_info(user_id: str) -> dict:
     """Fetch Instagram user info (username, name) via Graph API"""
-    # Skip API call for demo users
-    if user_id.startswith("demo_"):
-        return {"username": user_id, "name": ""}
+    # Skip API call for demo/test users
+    if user_id.startswith("demo_") or user_id.startswith("test_"):
+        return {"username": user_id, "name": "", "error": None}
     
     token = get_page_access_token()
     if not token:
-        return {"username": "", "name": ""}
+        return {"username": "", "name": "", "error": "No token"}
     
     try:
+        # Versuche zuerst mit username,name
         url = f"https://graph.facebook.com/v21.0/{user_id}"
         params = {
             "fields": "username,name",
             "access_token": token
         }
         response = requests.get(url, params=params, timeout=5)
-        if response.status_code == 200:
-            data = response.json()
-            # Check if it's an error response
-            if "error" not in data:
-                return {
-                    "username": data.get("username", ""),
-                    "name": data.get("name", "")
-                }
+        data = response.json()
+        
+        if response.status_code == 200 and "error" not in data:
+            return {
+                "username": data.get("username", ""),
+                "name": data.get("name", ""),
+                "error": None
+            }
+        
+        # Fallback: Versuche nur 'name' (manchmal ist username nicht verfügbar)
+        params["fields"] = "name"
+        response = requests.get(url, params=params, timeout=5)
+        data = response.json()
+        
+        if response.status_code == 200 and "error" not in data:
+            return {
+                "username": "",
+                "name": data.get("name", ""),
+                "error": None
+            }
+        
+        # Return error info for debugging
+        error_msg = data.get("error", {}).get("message", "Unknown error")
+        return {"username": "", "name": "", "error": error_msg}
+        
     except Exception as e:
-        pass
+        return {"username": "", "name": "", "error": str(e)}
     
-    # Return empty - will fall back to sender_name from DB or ID
-    return {"username": "", "name": ""}
+    return {"username": "", "name": "", "error": "Unknown"}
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=300)  # 5 min cache for debugging
 def get_cached_user_info(user_id: str) -> dict:
-    """Cached version of user info lookup (1 hour cache)"""
+    """Cached version of user info lookup"""
     return get_instagram_user_info(user_id)
 
 def get_instagram_account_id():
@@ -885,10 +902,15 @@ def render_chat_view(sender_id: str, auto_refresh_chat: bool = False):
     # Get username from Instagram API, DB, or use shortened ID
     user_info = get_cached_user_info(sender_id)
     db_name = messages.iloc[0].get('sender_name', '') or ''
-    api_name = user_info.get('username', '') or ''
-    # Fallback chain: API > DB > shortened sender_id
+    api_name = user_info.get('username', '') or user_info.get('name', '') or ''
+    api_error = user_info.get('error', '')
+    # Fallback chain: API username > API name > DB > shortened sender_id
     sender_name = api_name or db_name or f"User {sender_id[:12]}..."
     last_msg = messages.iloc[-1]
+    
+    # Debug: Show API response status (can be removed later)
+    if api_error:
+        st.caption(f"⚠️ Username API: {api_error[:50]}")
     
     # Header with optional auto-refresh for chat messages only
     col_header, col_refresh = st.columns([4, 1])
