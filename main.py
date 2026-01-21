@@ -78,15 +78,24 @@ def auto_tag_message(message_text: str) -> dict:
     }
 
 
-def process_message(messaging_event: dict) -> dict:
+def process_message(messaging_event: dict, own_ig_id: str = "") -> dict:
     """Verarbeitet ein einzelnes Messaging Event"""
     
     sender_id = messaging_event.get("sender", {}).get("id", "unknown")
     recipient_id = messaging_event.get("recipient", {}).get("id", "unknown")
     timestamp = messaging_event.get("timestamp", 0)
     
-    # Nachrichteninhalt extrahieren
+    # Prüfe ob es eine Echo-Nachricht ist (von uns selbst gesendet)
     message = messaging_event.get("message", {})
+    is_echo = message.get("is_echo", False)
+    
+    # Bestimme Richtung
+    # Echo = wir haben gesendet, oder sender_id = unsere ID
+    if is_echo or (own_ig_id and sender_id == own_ig_id):
+        direction = "outgoing"
+    else:
+        direction = "incoming"
+    
     message_id = message.get("mid", "")
     message_text = message.get("text", "")
     
@@ -118,7 +127,9 @@ def process_message(messaging_event: dict) -> dict:
         "is_story_reply": is_story_reply,
         "tags": tagging["tags"],
         "priority": tagging["priority"],
-        "status": "new"
+        "status": "new",
+        "direction": direction,
+        "is_echo": is_echo
     }
     
     return processed
@@ -298,11 +309,13 @@ def save_to_bigquery(message_data: dict):
         ts = int(message_data.get("timestamp", 0) or 0)
         received = message_data.get("received_at")
         
+        direction = escape(message_data.get("direction", "incoming"))
+        
         query = f"""
         INSERT INTO `{table_id}`
         (message_id, sender_id, recipient_id, timestamp, received_at, 
          message_text, has_attachments, attachment_types, is_story_reply, 
-         tags, priority, status)
+         tags, priority, status, direction)
         VALUES (
             '{msg_id}',
             '{sender_id}',
@@ -315,7 +328,8 @@ def save_to_bigquery(message_data: dict):
             {str(message_data.get("is_story_reply", False)).upper()},
             '{tags}',
             '{prio}',
-            'new'
+            'new',
+            '{direction}'
         )
         """
         
@@ -387,6 +401,18 @@ def webhook(request: Request):
             for event in messaging_events:
                 try:
                     processed = process_message(event)
+                    
+                    # Echo-Nachrichten (von uns selbst) überspringen
+                    # Diese werden bereits als response_text gespeichert
+                    if processed.get("is_echo") or processed.get("direction") == "outgoing":
+                        print(f"[Skipped] Echo/outgoing message: {processed['message_text'][:30]}...")
+                        continue
+                    
+                    # Leere Nachrichten (nur Reaktionen) überspringen
+                    if not processed.get("message_text", "").strip():
+                        print(f"[Skipped] Empty message (reaction/media without text)")
+                        continue
+                    
                     processed_messages.append(processed)
                     
                     # In BigQuery speichern
