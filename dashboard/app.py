@@ -131,16 +131,18 @@ def load_ad_media_ids() -> tuple:
     debug_info = []
     
     try:
-        # Lade alle Ads (mit Pagination für mehr als 200)
+        # Lade Ads (mit Pagination)
+        # Wir laden alle Ads, aber filtern Kommentare nach Datum (ab 2026)
         ads_url = f"https://graph.facebook.com/v21.0/act_{ad_account_id}/ads"
         params = {
-            "fields": "id,name,status,creative,created_time",
-            "limit": 500,  # Mehr Ads laden
+            "fields": "id,name,status,creative",
+            "limit": 500,
             "access_token": token
         }
         
         all_ads = []
-        while ads_url:
+        page_count = 0
+        while ads_url and page_count < 4:  # Max 4 Seiten = 2000 Ads
             response = requests.get(ads_url, params=params, timeout=30)
             if response.status_code != 200:
                 error = response.json().get("error", {}).get("message", "Unknown error")
@@ -152,10 +154,7 @@ def load_ad_media_ids() -> tuple:
             # Pagination - nächste Seite
             ads_url = result.get("paging", {}).get("next")
             params = {}  # URL enthält bereits alle Parameter
-            
-            # Sicherheitslimit
-            if len(all_ads) >= 2000:
-                break
+            page_count += 1
         
         ads_data = all_ads
         debug_info.append(f"Ads: {len(ads_data)}")
@@ -234,17 +233,23 @@ def load_instagram_posts(limit: int = 20) -> list:
     
     return []
 
-def load_post_comments(media_id: str, limit: int = 50) -> list:
-    """Lädt Kommentare eines Posts inkl. Replies (um zu prüfen ob wir schon geantwortet haben)"""
+def load_post_comments(media_id: str, limit: int = 50, since_date: str = "2026-01-01") -> list:
+    """Lädt Kommentare eines Posts inkl. Replies (nur ab since_date)"""
     token = get_page_access_token()
     if not token:
         return []
     
     try:
+        # Unix timestamp für since_date berechnen
+        from datetime import datetime
+        since_dt = datetime.strptime(since_date, "%Y-%m-%d")
+        since_timestamp = int(since_dt.timestamp())
+        
         url = f"https://graph.facebook.com/v21.0/{media_id}/comments"
         params = {
             "fields": "id,text,timestamp,username,from,replies{id,text,timestamp,username,from}",
             "limit": limit,
+            "since": since_timestamp,  # Nur Kommentare ab diesem Datum
             "access_token": token
         }
         
