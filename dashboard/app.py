@@ -899,18 +899,15 @@ def render_chat_view(sender_id: str, auto_refresh_chat: bool = False):
         st.info("Keine Nachrichten")
         return
     
-    # Get username from Instagram API, DB, or use shortened ID
-    user_info = get_cached_user_info(sender_id)
+    # Get username from DB (API requires Advanced Access which we don't have)
     db_name = messages.iloc[0].get('sender_name', '') or ''
-    api_name = user_info.get('username', '') or user_info.get('name', '') or ''
-    api_error = user_info.get('error', '')
-    # Fallback chain: API username > API name > DB > shortened sender_id
-    sender_name = api_name or db_name or f"User {sender_id[:12]}..."
+    # Fallback: DB name > formatted sender_id
+    if db_name and db_name != sender_id:
+        sender_name = db_name
+    else:
+        # Formatiere die ID lesbarer
+        sender_name = f"Kunde #{sender_id[-6:]}"
     last_msg = messages.iloc[-1]
-    
-    # Debug: Show API response status (can be removed later)
-    if api_error:
-        st.caption(f"⚠️ Username API: {api_error[:50]}")
     
     # Header with optional auto-refresh for chat messages only
     col_header, col_refresh = st.columns([4, 1])
@@ -1200,12 +1197,12 @@ def main():
             else:
                 for _, conv in conversations.iterrows():
                     sender_id = conv['sender_id']
-                    # Try to get username - API only works for testers without App Review
-                    user_info = get_cached_user_info(sender_id)
-                    username = user_info.get('username', '')
-                    db_name = conv.get('sender_name', '')
-                    # Use: API username > DB name > shortened ID
-                    sender_name = username or db_name or f"User {sender_id[:10]}..."
+                    db_name = conv.get('sender_name', '') or ''
+                    # Use: DB name > formatted ID (API needs Advanced Access)
+                    if db_name and db_name != sender_id:
+                        sender_name = db_name
+                    else:
+                        sender_name = f"Kunde #{sender_id[-6:]}"
                     has_unanswered = conv.get('has_unanswered', 0)
                     last_message = conv.get('last_message', '')[:50] + "..." if conv.get('last_message') else ""
                     tags = conv.get('tags', '') or ''
