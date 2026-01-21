@@ -317,9 +317,21 @@ def sync_instagram_comments():
         debug_messages.append("Keine Ad-Shortcodes gefunden - Sync abgebrochen")
         return 0, 0, " | ".join(debug_messages)
     
-    # 2. Lade Posts
-    posts = load_instagram_posts(limit=50)  # Mehr Posts laden um Ads zu finden
+    # 2. Lade Posts (mehr laden um ältere Ad-Posts zu finden)
+    posts = load_instagram_posts(limit=100)
     debug_messages.append(f"Posts geladen: {len(posts)}")
+    
+    # Debug: Zeige einige Shortcodes zum Vergleich
+    post_shortcodes = set(p.get("shortcode", "") for p in posts if p.get("shortcode"))
+    matching = ad_shortcodes.intersection(post_shortcodes)
+    debug_messages.append(f"Shortcode-Matches: {len(matching)}")
+    
+    # Zeige ein paar Beispiele falls keine Matches
+    if not matching and ad_shortcodes and post_shortcodes:
+        ad_examples = list(ad_shortcodes)[:3]
+        post_examples = list(post_shortcodes)[:3]
+        debug_messages.append(f"Ad-Shortcodes (Beispiele): {ad_examples}")
+        debug_messages.append(f"Post-Shortcodes (Beispiele): {post_examples}")
     
     synced_count = 0
     new_count = 0
