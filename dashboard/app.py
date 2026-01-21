@@ -1206,12 +1206,14 @@ def render_chat_view(sender_id: str, auto_refresh_chat: bool = False):
         st.info("Keine Nachrichten")
         return
     
-    # Get username from Instagram API (using Instagram Token)
-    user_info = get_cached_user_info(sender_id)
+    # Username: DB zuerst, dann API falls nötig
     db_name = messages.iloc[0].get('sender_name', '') or ''
-    api_username = user_info.get('username', '') or ''
-    # Fallback chain: API username > DB name > formatted ID
-    sender_name = api_username or db_name or f"Kunde #{sender_id[-6:]}"
+    if db_name:
+        sender_name = db_name
+    else:
+        user_info = get_cached_user_info(sender_id)
+        api_username = user_info.get('username', '') or ''
+        sender_name = api_username or f"Kunde #{sender_id[-6:]}"
     last_msg = messages.iloc[-1]
     
     # Header with refresh and blacklist buttons
@@ -1611,12 +1613,16 @@ def main():
                 
                 for _, conv in page_conversations.iterrows():
                     sender_id = conv['sender_id']
-                    # Get username via Instagram API (now works with IG token!)
-                    user_info = get_cached_user_info(sender_id)
-                    api_username = user_info.get('username', '') or ''
                     db_name = conv.get('sender_name', '') or ''
-                    # Use: API username > DB name > formatted ID
-                    sender_name = api_username or db_name or f"Kunde #{sender_id[-6:]}"
+                    
+                    # Nur API aufrufen wenn DB-Name fehlt (spart viele API-Calls!)
+                    if db_name:
+                        sender_name = db_name
+                    else:
+                        # Kein Name in DB - versuche API (wird gecacht)
+                        user_info = get_cached_user_info(sender_id)
+                        api_username = user_info.get('username', '') or ''
+                        sender_name = api_username or f"Kunde #{sender_id[-6:]}"
                     has_unanswered = conv.get('has_unanswered', 0)
                     last_message = conv.get('last_message', '')[:50] + "..." if conv.get('last_message') else ""
                     tags = conv.get('tags', '') or ''
