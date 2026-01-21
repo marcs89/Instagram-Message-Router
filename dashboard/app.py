@@ -118,6 +118,160 @@ def send_instagram_message(recipient_id: str, message_text: str) -> tuple[bool, 
         return False, f"Fehler: {str(e)}"
 
 
+def load_instagram_conversations(limit: int = 100) -> list:
+    """Lädt alle Instagram Conversations von der API"""
+    token = get_instagram_access_token()
+    if not token:
+        return []
+    
+    try:
+        url = "https://graph.instagram.com/v21.0/me/conversations"
+        params = {
+            "platform": "instagram",
+            "fields": "participants,id,updated_time",
+            "limit": limit,
+            "access_token": token
+        }
+        
+        all_conversations = []
+        while url and len(all_conversations) < limit:
+            response = requests.get(url, params=params, timeout=30)
+            if response.status_code == 200:
+                data = response.json()
+                all_conversations.extend(data.get("data", []))
+                # Pagination
+                url = data.get("paging", {}).get("next")
+                params = {}  # URL hat bereits alle Parameter
+            else:
+                break
+        
+        return all_conversations
+    except Exception as e:
+        print(f"Error loading conversations: {e}")
+        return []
+
+
+def load_conversation_messages(conversation_id: str, limit: int = 50) -> list:
+    """Lädt Nachrichten einer Conversation von der Instagram API"""
+    token = get_instagram_access_token()
+    if not token:
+        return []
+    
+    try:
+        url = f"https://graph.instagram.com/v21.0/{conversation_id}"
+        params = {
+            "fields": "messages{id,message,created_time,from}",
+            "access_token": token
+        }
+        
+        response = requests.get(url, params=params, timeout=30)
+        if response.status_code == 200:
+            data = response.json()
+            return data.get("messages", {}).get("data", [])
+        return []
+    except Exception as e:
+        print(f"Error loading messages for {conversation_id}: {e}")
+        return []
+
+
+def sync_conversation_history(sender_id: str, conversation_id: str = None) -> tuple[int, str]:
+    """Synchronisiert die Nachrichtenhistorie eines Users von Instagram zu BigQuery
+    Returns: (count, message)
+    """
+    client = get_bq_client()
+    token = get_instagram_access_token()
+    if not token:
+        return 0, "Kein Instagram Token"
+    
+    # Finde Conversation ID falls nicht gegeben
+    if not conversation_id:
+        conversations = load_instagram_conversations(limit=200)
+        for conv in conversations:
+            participants = conv.get("participants", {}).get("data", [])
+            for p in participants:
+                if p.get("id") == sender_id:
+                    conversation_id = conv.get("id")
+                    break
+            if conversation_id:
+                break
+    
+    if not conversation_id:
+        return 0, "Conversation nicht gefunden"
+    
+    # Lade Nachrichten
+    messages = load_conversation_messages(conversation_id, limit=100)
+    if not messages:
+        return 0, "Keine Nachrichten gefunden"
+    
+    # Eigene IG ID
+    own_ig_id = get_instagram_account_id() or get_own_instagram_id()
+    
+    new_count = 0
+    for msg in messages:
+        msg_id = msg.get("id", "")
+        msg_text = msg.get("message", "")
+        created_time = msg.get("created_time", "")
+        from_id = msg.get("from", {}).get("id", "")
+        from_username = msg.get("from", {}).get("username", "")
+        
+        if not msg_id:
+            continue
+        
+        # Prüfe ob schon existiert
+        check_query = f"""
+        SELECT message_id FROM `root-slate-454410-u0.instagram_messages.messages`
+        WHERE message_id = '{msg_id}'
+        """
+        try:
+            existing = client.query(check_query).to_dataframe()
+            if not existing.empty:
+                continue  # Bereits vorhanden
+        except:
+            pass
+        
+        # Bestimme sender/recipient basierend auf from_id
+        if from_id == own_ig_id:
+            # Unsere eigene Nachricht (ausgehend)
+            actual_sender_id = own_ig_id
+            actual_recipient_id = sender_id
+        else:
+            # Kundennachricht (eingehend)
+            actual_sender_id = sender_id
+            actual_recipient_id = own_ig_id
+        
+        # In BigQuery speichern
+        insert_query = f"""
+        INSERT INTO `root-slate-454410-u0.instagram_messages.messages`
+        (message_id, sender_id, sender_name, recipient_id, timestamp, received_at, 
+         message_text, has_attachments, attachment_types, is_story_reply, 
+         categories, primary_category, priority, status, tags)
+        VALUES (
+            '{msg_id}',
+            '{actual_sender_id}',
+            '{from_username.replace("'", "''")}',
+            '{actual_recipient_id}',
+            UNIX_SECONDS(TIMESTAMP('{created_time}')),
+            TIMESTAMP('{created_time}'),
+            '{msg_text.replace("'", "''")}',
+            FALSE,
+            '[]',
+            FALSE,
+            '[]',
+            'historie',
+            'normal',
+            'synced',
+            ''
+        )
+        """
+        try:
+            client.query(insert_query).result()
+            new_count += 1
+        except Exception as e:
+            print(f"Error inserting message {msg_id}: {e}")
+    
+    return new_count, f"{new_count} Nachrichten synchronisiert"
+
+
 # === INSTAGRAM POSTS & COMMENTS API ===
 def get_ad_account_id():
     """Get Ad Account ID from secrets or env"""
@@ -898,13 +1052,21 @@ def render_chat_view(sender_id: str, auto_refresh_chat: bool = False):
     sender_name = api_username or db_name or f"Kunde #{sender_id[-6:]}"
     last_msg = messages.iloc[-1]
     
-    # Header with optional auto-refresh for chat messages only
-    col_header, col_refresh = st.columns([4, 1])
+    # Header with refresh and blacklist buttons
+    col_header, col_refresh, col_blacklist = st.columns([4, 1, 1])
     with col_header:
         st.subheader(f"💬 {sender_name}")
     with col_refresh:
         if st.button("🔄", key=f"refresh_chat_{sender_id}", help="Chat aktualisieren"):
             load_chat_history.clear()
+            st.rerun()
+    with col_blacklist:
+        if st.button("🚫", key=f"blacklist_{sender_id}", help="User blockieren (aus Liste ausblenden)"):
+            if 'blacklist' not in st.session_state:
+                st.session_state.blacklist = set()
+            st.session_state.blacklist.add(sender_id)
+            st.session_state.selected_chat = None
+            st.success(f"User ausgeblendet")
             st.rerun()
     
     # Tags anzeigen & bearbeiten
@@ -941,6 +1103,19 @@ def render_chat_view(sender_id: str, auto_refresh_chat: bool = False):
                     update_message(msg['message_id'], {"tags": tags_str})
                 st.success("✅ Tags gespeichert!")
                 st.rerun()
+    
+    # Historie laden
+    with st.expander("📜 Ältere Nachrichten laden"):
+        st.caption("Lädt ältere Nachrichten von Instagram (kann etwas dauern)")
+        if st.button("📥 Historie laden", key=f"load_history_{sender_id}"):
+            with st.spinner("Lade Nachrichtenverlauf von Instagram..."):
+                count, msg = sync_conversation_history(sender_id)
+                if count > 0:
+                    st.success(f"✅ {msg}")
+                    load_chat_history.clear()
+                    st.rerun()
+                else:
+                    st.info(msg)
     
     # === ANTWORT-BOX (oben) ===
     last_msg_text = last_msg.get('message_text', '')
@@ -1091,7 +1266,7 @@ def main():
                 st.rerun()
     
     # Tabs
-    tab1, tab2, tab3 = st.tabs(["📬 Inbox", "📢 Ad-Kommentare", "🧪 Test"])
+    tab1, tab2 = st.tabs(["📬 Inbox", "📢 Ad-Kommentare"])
     
     # ===== TAB 1: Inbox =====
     with tab1:
@@ -1161,6 +1336,26 @@ def main():
                 options=all_tags,
                 key="filter_tags"
             )
+            
+            # Blacklist-Verwaltung
+            if 'blacklist' not in st.session_state:
+                st.session_state.blacklist = set()
+            
+            if st.session_state.blacklist:
+                st.divider()
+                with st.expander(f"🚫 Blockierte User ({len(st.session_state.blacklist)})"):
+                    for blocked_id in list(st.session_state.blacklist):
+                        # Versuche Username zu holen
+                        user_info = get_cached_user_info(blocked_id)
+                        blocked_name = user_info.get('username', '') or f"User #{blocked_id[-6:]}"
+                        
+                        col_name, col_unblock = st.columns([3, 1])
+                        with col_name:
+                            st.write(blocked_name)
+                        with col_unblock:
+                            if st.button("✓", key=f"unblock_{blocked_id}", help="Entsperren"):
+                                st.session_state.blacklist.discard(blocked_id)
+                                st.rerun()
         
         # Main Content
         col_inbox, col_chat = st.columns([1, 2])
@@ -1181,10 +1376,49 @@ def main():
                 filter_tags_str=",".join(filter_tags) if filter_tags else ""
             )
             
+            # Blacklist aus Session State
+            if 'blacklist' not in st.session_state:
+                st.session_state.blacklist = set()
+            
+            # Blacklist anwenden
+            if not conversations.empty:
+                conversations = conversations[~conversations['sender_id'].isin(st.session_state.blacklist)]
+            
+            # Paging
+            CHATS_PER_PAGE = 15
+            if 'chat_page' not in st.session_state:
+                st.session_state.chat_page = 0
+            
+            total_chats = len(conversations) if not conversations.empty else 0
+            total_pages = max(1, (total_chats + CHATS_PER_PAGE - 1) // CHATS_PER_PAGE)
+            current_page = min(st.session_state.chat_page, total_pages - 1)
+            
             if conversations.empty:
                 st.info("Keine Chats gefunden")
             else:
-                for _, conv in conversations.iterrows():
+                # Paging Info
+                start_idx = current_page * CHATS_PER_PAGE
+                end_idx = min(start_idx + CHATS_PER_PAGE, total_chats)
+                st.caption(f"Zeige {start_idx + 1}-{end_idx} von {total_chats}")
+                
+                # Paging Buttons oben
+                if total_pages > 1:
+                    pg_col1, pg_col2, pg_col3 = st.columns([1, 2, 1])
+                    with pg_col1:
+                        if st.button("◀", key="prev_page", disabled=current_page == 0):
+                            st.session_state.chat_page = current_page - 1
+                            st.rerun()
+                    with pg_col2:
+                        st.markdown(f"<center>Seite {current_page + 1}/{total_pages}</center>", unsafe_allow_html=True)
+                    with pg_col3:
+                        if st.button("▶", key="next_page", disabled=current_page >= total_pages - 1):
+                            st.session_state.chat_page = current_page + 1
+                            st.rerun()
+                
+                # Konversationen dieser Seite anzeigen
+                page_conversations = conversations.iloc[start_idx:end_idx]
+                
+                for _, conv in page_conversations.iterrows():
                     sender_id = conv['sender_id']
                     # Get username via Instagram API (now works with IG token!)
                     user_info = get_cached_user_info(sender_id)
@@ -1534,72 +1768,6 @@ Sentiment: {sentiment}
                 
         except Exception as e:
             st.error(f"Fehler beim Laden: {e}")
-        
-        # Test-Kommentar erstellen
-        with st.expander("🧪 Test-Kommentar erstellen"):
-            test_comment = st.text_input("Kommentar", "Ist das auch in Blau verfügbar?", key="tc_text")
-            test_sentiment = st.selectbox("Sentiment", ["question", "positive", "negative"], key="tc_sent")
-            test_ad = st.text_input("Ad-Name", "Betthimmel Kampagne", key="tc_ad")
-            
-            if st.button("Erstellen", key="create_tc"):
-                comment_id = f"test_c_{datetime.now().timestamp()}"
-                client.query(f"""
-                INSERT INTO `root-slate-454410-u0.instagram_messages.ad_comments`
-                (comment_id, post_id, ad_name, commenter_id, commenter_name, comment_text, 
-                 created_at, sentiment, status, is_hidden, is_deleted, priority)
-                VALUES (
-                    '{comment_id}', 'test_post', '{test_ad.replace("'", "''")}',
-                    'test_user', 'Test Nutzer', '{test_comment.replace("'", "''")}',
-                    CURRENT_TIMESTAMP(), '{test_sentiment}', 'new', FALSE, FALSE,
-                    '{"high" if test_sentiment == "negative" else "normal"}'
-                )
-                """).result()
-                st.success("✅ Erstellt!")
-                st.rerun()
-    
-    # ===== TAB 3: Test =====
-    with tab3:
-        st.subheader("🧪 Test-Nachricht erstellen")
-        
-        test_text = st.text_input("Nachrichtentext", "Hallo, welche Größe passt bei 80cm?")
-        test_sender = st.text_input("Absender", "Test User")
-        test_tags = st.multiselect("Tags", options=get_all_tags(), key="test_tags")
-        
-        if st.button("Erstellen"):
-            client = get_bq_client()
-            msg_id = f"test_{datetime.now().timestamp()}"
-            sender_id = f"test_sender_{hash(test_sender) % 10000}"
-            tags_str = ",".join(test_tags) if test_tags else ""
-            
-            query = f"""
-            INSERT INTO `root-slate-454410-u0.instagram_messages.messages`
-            (message_id, sender_id, sender_name, recipient_id, timestamp, received_at, 
-             message_text, has_attachments, attachment_types, is_story_reply, 
-             categories, primary_category, priority, status, tags)
-            VALUES (
-                '{msg_id}',
-                '{sender_id}',
-                '{test_sender.replace("'", "''")}',
-                'lilimaus_page',
-                {int(datetime.now().timestamp())},
-                CURRENT_TIMESTAMP(),
-                '{test_text.replace("'", "''")}',
-                FALSE,
-                '[]',
-                FALSE,
-                '[]',
-                'unkategorisiert',
-                'normal',
-                'new',
-                '{tags_str}'
-            )
-            """
-            try:
-                client.query(query).result()
-                st.success("✅ Test-Nachricht erstellt!")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Fehler: {e}")
 
 
 if __name__ == "__main__":
