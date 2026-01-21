@@ -1703,14 +1703,9 @@ def main():
                     sender_id = conv['sender_id']
                     db_name = conv.get('sender_name', '') or ''
                     
-                    # Nur API aufrufen wenn DB-Name fehlt (spart viele API-Calls!)
-                    if db_name:
-                        sender_name = db_name
-                    else:
-                        # Kein Name in DB - versuche API (wird gecacht)
-                        user_info = get_cached_user_info(sender_id)
-                        api_username = user_info.get('username', '') or ''
-                        sender_name = api_username or f"Kunde #{sender_id[-6:]}"
+                    # In der Liste: KEINE API-Calls! Nur DB-Name oder formatierte ID
+                    # API wird nur beim Öffnen des Chats aufgerufen
+                    sender_name = db_name or f"Kunde #{sender_id[-6:]}"
                     has_unanswered = conv.get('has_unanswered', 0)
                     last_message = conv.get('last_message', '')[:50] + "..." if conv.get('last_message') else ""
                     tags = conv.get('tags', '') or ''
