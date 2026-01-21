@@ -986,6 +986,56 @@ def get_all_tags():
     except:
         return DEFAULT_TAGS
 
+
+# === BLACKLIST FUNCTIONS (persistent in BigQuery) ===
+@st.cache_data(ttl=60)
+def load_blacklist() -> set:
+    """Lädt die Blacklist aus BigQuery"""
+    client = get_bq_client()
+    try:
+        df = client.query("""
+            SELECT user_id FROM `root-slate-454410-u0.instagram_messages.blacklist`
+        """).to_dataframe()
+        return set(df['user_id'].tolist())
+    except:
+        return set()
+
+
+def add_to_blacklist(user_id: str, username: str = "", blocked_by: str = ""):
+    """Fügt einen User zur Blacklist hinzu"""
+    client = get_bq_client()
+    escaped_id = user_id.replace("'", "''")
+    escaped_name = username.replace("'", "''") if username else ""
+    escaped_by = blocked_by.replace("'", "''") if blocked_by else ""
+    
+    try:
+        client.query(f"""
+            INSERT INTO `root-slate-454410-u0.instagram_messages.blacklist`
+            (user_id, username, blocked_by)
+            VALUES ('{escaped_id}', '{escaped_name}', '{escaped_by}')
+        """).result()
+        load_blacklist.clear()  # Cache leeren
+        return True
+    except:
+        return False
+
+
+def remove_from_blacklist(user_id: str):
+    """Entfernt einen User von der Blacklist"""
+    client = get_bq_client()
+    escaped_id = user_id.replace("'", "''")
+    
+    try:
+        client.query(f"""
+            DELETE FROM `root-slate-454410-u0.instagram_messages.blacklist`
+            WHERE user_id = '{escaped_id}'
+        """).result()
+        load_blacklist.clear()  # Cache leeren
+        return True
+    except:
+        return False
+
+
 # AI System Prompt
 AI_SYSTEM_PROMPT = """
 Du antwortest auf Instagram DMs für LILIMAUS (Baby- und Kinderzimmer-Ausstattung).
@@ -1226,9 +1276,8 @@ def render_chat_view(sender_id: str, auto_refresh_chat: bool = False):
             st.rerun()
     with col_blacklist:
         if st.button("🚫", key=f"blacklist_{sender_id}", help="User blockieren (aus Liste ausblenden)"):
-            if 'blacklist' not in st.session_state:
-                st.session_state.blacklist = set()
-            st.session_state.blacklist.add(sender_id)
+            user_kuerzel = st.session_state.get('user_kuerzel', 'XX')
+            add_to_blacklist(sender_id, sender_name, user_kuerzel)
             st.session_state.selected_chat = None
             st.success(f"User ausgeblendet")
             st.rerun()
@@ -1496,24 +1545,21 @@ def main():
                 key="filter_tags"
             )
             
-            # Blacklist-Verwaltung
-            if 'blacklist' not in st.session_state:
-                st.session_state.blacklist = set()
+            # Blacklist-Verwaltung (persistent aus DB)
+            blacklist = load_blacklist()
             
-            if st.session_state.blacklist:
+            if blacklist:
                 st.divider()
-                with st.expander(f"🚫 Blockierte User ({len(st.session_state.blacklist)})"):
-                    for blocked_id in list(st.session_state.blacklist):
-                        # Versuche Username zu holen
-                        user_info = get_cached_user_info(blocked_id)
-                        blocked_name = user_info.get('username', '') or f"User #{blocked_id[-6:]}"
+                with st.expander(f"🚫 Blockierte User ({len(blacklist)})"):
+                    for blocked_id in list(blacklist):
+                        blocked_name = f"User #{blocked_id[-6:]}"
                         
                         col_name, col_unblock = st.columns([3, 1])
                         with col_name:
                             st.write(blocked_name)
                         with col_unblock:
                             if st.button("✓", key=f"unblock_{blocked_id}", help="Entsperren"):
-                                st.session_state.blacklist.discard(blocked_id)
+                                remove_from_blacklist(blocked_id)
                                 st.rerun()
         
         # Main Content
@@ -1535,17 +1581,16 @@ def main():
                 filter_tags_str=",".join(filter_tags) if filter_tags else ""
             )
             
-            # Blacklist aus Session State
-            if 'blacklist' not in st.session_state:
-                st.session_state.blacklist = set()
+            # Blacklist aus DB laden
+            blacklist = load_blacklist()
             
             # Selected Chats für Bulk-Actions
             if 'selected_chats' not in st.session_state:
                 st.session_state.selected_chats = set()
             
             # Blacklist anwenden
-            if not conversations.empty:
-                conversations = conversations[~conversations['sender_id'].isin(st.session_state.blacklist)]
+            if not conversations.empty and blacklist:
+                conversations = conversations[~conversations['sender_id'].isin(blacklist)]
             
             # Paging
             CHATS_PER_PAGE = 15
@@ -1581,7 +1626,9 @@ def main():
                             st.rerun()
                     with bulk_col2:
                         if st.button("🚫 Blacklist", key="bulk_blacklist", help="Auf Blacklist setzen"):
-                            st.session_state.blacklist.update(st.session_state.selected_chats)
+                            user_kuerzel = st.session_state.get('user_kuerzel', 'XX')
+                            for user_id in st.session_state.selected_chats:
+                                add_to_blacklist(user_id, blocked_by=user_kuerzel)
                             st.session_state.selected_chats = set()
                             st.success(f"{selected_count} User auf Blacklist")
                             st.rerun()
