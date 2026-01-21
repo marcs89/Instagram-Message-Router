@@ -1069,53 +1069,27 @@ def render_chat_view(sender_id: str, auto_refresh_chat: bool = False):
             st.success(f"User ausgeblendet")
             st.rerun()
     
-    # Tags anzeigen & bearbeiten
+    # Tags anzeigen & bearbeiten (kompakt, ohne Expander)
     current_tags_str = last_msg.get('tags', '') or ''
     current_tags = [t.strip() for t in current_tags_str.split(',') if t.strip()]
+    all_tags = get_all_tags()
     
-    # Tags Display
-    if current_tags:
-        tags_html = " ".join([f'<span class="tag">{t}</span>' for t in current_tags])
-        st.markdown(tags_html, unsafe_allow_html=True)
-    
-    # Tags bearbeiten
-    with st.expander("🏷️ Tags bearbeiten"):
-        all_tags = get_all_tags()
-        
+    # Tags inline bearbeiten
+    col_tags, col_save = st.columns([4, 1])
+    with col_tags:
         selected_tags = st.multiselect(
-            "Tags auswählen",
+            "🏷️ Tags",
             options=all_tags,
             default=[t for t in current_tags if t in all_tags],
-            key=f"tags_{sender_id}"
+            key=f"tags_{sender_id}",
+            label_visibility="collapsed"
         )
-        
-        new_tag = st.text_input("Neuen Tag erstellen", key=f"new_tag_{sender_id}")
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("💾 Tags speichern", key=f"save_tags_{sender_id}"):
-                final_tags = selected_tags.copy()
-                if new_tag and new_tag.strip():
-                    final_tags.append(new_tag.strip())
-                
-                tags_str = ",".join(final_tags)
-                for _, msg in messages.iterrows():
-                    update_message(msg['message_id'], {"tags": tags_str})
-                st.success("✅ Tags gespeichert!")
-                st.rerun()
-    
-    # Historie laden
-    with st.expander("📜 Ältere Nachrichten laden"):
-        st.caption("Lädt ältere Nachrichten von Instagram (kann etwas dauern)")
-        if st.button("📥 Historie laden", key=f"load_history_{sender_id}"):
-            with st.spinner("Lade Nachrichtenverlauf von Instagram..."):
-                count, msg = sync_conversation_history(sender_id)
-                if count > 0:
-                    st.success(f"✅ {msg}")
-                    load_chat_history.clear()
-                    st.rerun()
-                else:
-                    st.info(msg)
+    with col_save:
+        if st.button("💾", key=f"save_tags_{sender_id}", help="Tags speichern"):
+            tags_str = ",".join(selected_tags)
+            for _, msg in messages.iterrows():
+                update_message(msg['message_id'], {"tags": tags_str})
+            st.rerun()
     
     # === ANTWORT-BOX (oben) ===
     last_msg_text = last_msg.get('message_text', '')
@@ -1231,12 +1205,24 @@ def render_chat_view(sender_id: str, auto_refresh_chat: bool = False):
             </div>
             """, unsafe_allow_html=True)
     
-    # "Mehr laden" Button unten (falls es ältere Nachrichten gibt)
+    # "Mehr laden" Button unten (falls es ältere Nachrichten in der DB gibt)
     if end_idx < total_messages:
         remaining = total_messages - end_idx
-        if st.button(f"📜 Ältere Nachrichten laden ({remaining} weitere)", key=f"load_more_{sender_id}"):
+        if st.button(f"📜 Mehr anzeigen ({remaining} weitere in DB)", key=f"load_more_{sender_id}"):
             st.session_state[page_key] += 1
             st.rerun()
+    
+    # Historie von Instagram laden (unter dem Chat)
+    st.divider()
+    if st.button("📥 Ältere Nachrichten von Instagram laden", key=f"load_ig_history_{sender_id}"):
+        with st.spinner("Lade von Instagram..."):
+            count, msg = sync_conversation_history(sender_id)
+            if count > 0:
+                st.success(f"✅ {msg}")
+                load_chat_history.clear()
+                st.rerun()
+            else:
+                st.info(msg)
     
 
 
