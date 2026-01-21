@@ -204,7 +204,7 @@ def load_message_content(message_id: str) -> str:
     """Lädt den Inhalt einer Nachricht (Attachments, Story-Replies) von Instagram"""
     token = get_instagram_access_token()
     if not token:
-        return "[Fehler: Kein Token]"
+        return "⚠️ Kein Token"
     
     try:
         url = f"https://graph.instagram.com/v21.0/{message_id}"
@@ -241,29 +241,35 @@ def load_message_content(message_id: str) -> str:
                     img_url = att["image_data"].get("url", "")
                     if img_url:
                         return f"🖼️ [Bild anzeigen]({img_url})"
-                    return "🖼️ Bild (URL nicht verfügbar)"
+                    return "🖼️ Bild gesendet"
                 
                 # Video
                 if "video_data" in att:
                     video_url = att["video_data"].get("url", "")
                     if video_url:
                         return f"🎬 [Video anzeigen]({video_url})"
-                    return "🎬 Video (URL nicht verfügbar)"
+                    return "🎬 Video gesendet"
                 
                 # Audio
                 if "audio_data" in att:
                     return "🎤 Sprachnachricht"
                 
                 # Sonstiges
-                return f"📎 Attachment"
+                return "📎 Datei gesendet"
             
-            return "[Inhalt konnte nicht geladen werden]"
+            return "📨 Medien-Nachricht (Details nicht verfügbar)"
         else:
-            error = response.json().get("error", {}).get("message", "Unbekannter Fehler")
-            return f"[API Fehler: {error[:50]}]"
+            error_data = response.json().get("error", {})
+            error_msg = error_data.get("message", "")
+            
+            # Bekannte Fehler mit freundlicher Meldung
+            if "Unsupported get request" in error_msg:
+                return "📨 Bild/Video/Story (nicht mehr abrufbar)"
+            
+            return f"⚠️ Nicht abrufbar"
             
     except Exception as e:
-        return f"[Fehler: {str(e)[:30]}]"
+        return "⚠️ Laden fehlgeschlagen"
 
 
 def sync_conversation_history(sender_id: str, conversation_id: str = None) -> tuple[int, str]:
@@ -321,22 +327,24 @@ def sync_conversation_history(sender_id: str, conversation_id: str = None) -> tu
         except:
             pass
         
-        # Bestimme sender/recipient basierend auf from_id
+        # Bestimme sender/recipient und direction basierend auf from_id
         if from_id == own_ig_id:
             # Unsere eigene Nachricht (ausgehend)
             actual_sender_id = own_ig_id
             actual_recipient_id = sender_id
+            direction = "outgoing"
         else:
             # Kundennachricht (eingehend)
             actual_sender_id = sender_id
             actual_recipient_id = own_ig_id
+            direction = "incoming"
         
         # In BigQuery speichern
         insert_query = f"""
         INSERT INTO `root-slate-454410-u0.instagram_messages.messages`
         (message_id, sender_id, sender_name, recipient_id, timestamp, received_at, 
          message_text, has_attachments, attachment_types, is_story_reply, 
-         categories, primary_category, priority, status, tags)
+         categories, primary_category, priority, status, tags, direction)
         VALUES (
             '{msg_id}',
             '{actual_sender_id}',
@@ -352,7 +360,8 @@ def sync_conversation_history(sender_id: str, conversation_id: str = None) -> tu
             'historie',
             'normal',
             'synced',
-            ''
+            '',
+            '{direction}'
         )
         """
         try:
@@ -1083,12 +1092,14 @@ def load_conversations(filter_type: str = "all", filter_tags_str: str = ""):
 
 @st.cache_data(ttl=15)  # Cache for 15 seconds
 def load_chat_history(sender_id: str):
-    """Lädt den Chat-Verlauf für einen Sender (cached)"""
+    """Lädt den Chat-Verlauf für einen Sender (eingehend + ausgehend)"""
     client = get_bq_client()
+    # Lade sowohl eingehende (sender_id = kunde) als auch ausgehende (recipient_id = kunde) Nachrichten
     query = f"""
     SELECT *
     FROM `root-slate-454410-u0.instagram_messages.messages`
-    WHERE sender_id = '{sender_id}'
+    WHERE sender_id = '{sender_id}' 
+       OR recipient_id = '{sender_id}'
     ORDER BY received_at ASC
     """
     try:
@@ -1306,7 +1317,10 @@ def render_chat_view(sender_id: str, auto_refresh_chat: bool = False):
         except:
             time_str = ""
         
-        # Antwort zuerst (da umgekehrte Reihenfolge)
+        message_text = msg.get('message_text', '') or ''
+        direction = msg.get('direction', 'incoming') or 'incoming'
+        
+        # Prüfe ob es eine Antwort über das Tool gibt (response_text)
         response = msg.get('response_text', '')
         if response:
             responded_by = msg.get('responded_by', '')
@@ -1318,44 +1332,80 @@ def render_chat_view(sender_id: str, auto_refresh_chat: bool = False):
             </div>
             """, unsafe_allow_html=True)
         
-        # Eingehende Nachricht
-        message_text = msg.get('message_text', '') or ''
-        if message_text.strip():
-            st.markdown(f"""
-            <div class="message-incoming">
-                <div>{message_text}</div>
-                <div class="message-time">{time_str}</div>
-            </div>
-            """, unsafe_allow_html=True)
-        else:
-            # Leere Nachricht - versuche Attachment-Info zu laden
-            msg_id = msg.get('message_id', '')
-            attachment_key = f"attachment_{msg_id}"
-            
-            # Prüfe ob wir schon Attachment-Info haben
-            if attachment_key in st.session_state:
-                att_info = st.session_state[attachment_key]
+        # Ausgehende Nachricht (von uns gesendet - direkt in Instagram oder via Sync)
+        if direction == 'outgoing':
+            if message_text.strip():
+                st.markdown(f"""
+                <div class="message-outgoing">
+                    <div>{message_text}</div>
+                    <div class="message-time">✓ {time_str}</div>
+                </div>
+                """, unsafe_allow_html=True)
+            # Leere ausgehende Nachrichten (z.B. nur Bild gesendet) - optional anzeigen
+            elif not response:  # Nur wenn noch keine response_text angezeigt wurde
+                msg_id = msg.get('message_id', '')
+                attachment_key = f"attachment_{msg_id}"
+                if attachment_key in st.session_state:
+                    att_info = st.session_state[attachment_key]
+                    st.markdown(f"""
+                    <div class="message-outgoing">
+                        <div>{att_info}</div>
+                        <div class="message-time">✓ {time_str}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                else:
+                    col_msg, col_btn = st.columns([4, 1])
+                    with col_msg:
+                        st.markdown(f"""
+                        <div class="message-outgoing" style="opacity: 0.6;">
+                            <div><em>[Medien gesendet]</em></div>
+                            <div class="message-time">✓ {time_str}</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    with col_btn:
+                        if st.button("👁️", key=f"load_att_{msg_id}", help="Inhalt laden"):
+                            att_info = load_message_content(msg_id)
+                            st.session_state[attachment_key] = att_info
+                            st.rerun()
+        
+        # Eingehende Nachricht (vom Kunden)
+        elif direction == 'incoming':
+            if message_text.strip():
                 st.markdown(f"""
                 <div class="message-incoming">
-                    <div>{att_info}</div>
+                    <div>{message_text}</div>
                     <div class="message-time">{time_str}</div>
                 </div>
                 """, unsafe_allow_html=True)
             else:
-                # Zeige Platzhalter mit "Laden" Button
-                col_msg, col_btn = st.columns([4, 1])
-                with col_msg:
+                # Leere Nachricht - versuche Attachment-Info zu laden
+                msg_id = msg.get('message_id', '')
+                attachment_key = f"attachment_{msg_id}"
+                
+                # Prüfe ob wir schon Attachment-Info haben
+                if attachment_key in st.session_state:
+                    att_info = st.session_state[attachment_key]
                     st.markdown(f"""
-                    <div class="message-incoming" style="opacity: 0.6;">
-                        <div><em>[Medien-Nachricht]</em></div>
+                    <div class="message-incoming">
+                        <div>{att_info}</div>
                         <div class="message-time">{time_str}</div>
                     </div>
                     """, unsafe_allow_html=True)
-                with col_btn:
-                    if st.button("👁️", key=f"load_att_{msg_id}", help="Inhalt laden"):
-                        att_info = load_message_content(msg_id)
-                        st.session_state[attachment_key] = att_info
-                        st.rerun()
+                else:
+                    # Zeige Platzhalter mit "Laden" Button
+                    col_msg, col_btn = st.columns([4, 1])
+                    with col_msg:
+                        st.markdown(f"""
+                        <div class="message-incoming" style="opacity: 0.6;">
+                            <div><em>[Medien-Nachricht]</em></div>
+                            <div class="message-time">{time_str}</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    with col_btn:
+                        if st.button("👁️", key=f"load_att_{msg_id}", help="Inhalt laden"):
+                            att_info = load_message_content(msg_id)
+                            st.session_state[attachment_key] = att_info
+                            st.rerun()
     
     # "Mehr laden" Button unten (falls es ältere Nachrichten in der DB gibt)
     if end_idx < total_messages:
