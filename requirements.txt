@@ -2,6 +2,7 @@ functions-framework==3.*
 flask>=2.0.0
 gunicorn>=21.0.0
 google-cloud-bigquery>=3.0.0
+google-cloud-secret-manager>=2.0.0
 db-dtypes>=1.0.0
 pyarrow>=14.0.0
 streamlit>=1.30.0

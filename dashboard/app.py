@@ -29,13 +29,39 @@ for env_path in possible_env_paths:
 if not os.getenv("GEMINI_API_KEY"):
     os.environ["GEMINI_API_KEY"] = "AIzaSyBCZxnGUJwFJ6j3f4brhV8XrLLUYV9vjHg"
 
+# Google Secret Manager for Token Management
+GCP_PROJECT_ID = "root-slate-454410-u0"
+
+@st.cache_data(ttl=300)  # 5 min cache
+def get_secret_from_gcp(secret_name: str) -> str:
+    """Load secret from Google Secret Manager"""
+    try:
+        from google.cloud import secretmanager
+        client = secretmanager.SecretManagerServiceClient()
+        name = f"projects/{GCP_PROJECT_ID}/secrets/{secret_name}/versions/latest"
+        response = client.access_secret_version(request={"name": name})
+        return response.payload.data.decode("UTF-8")
+    except Exception as e:
+        # Fallback to None if Secret Manager fails
+        return None
+
 # Instagram API Functions
 def get_page_access_token():
-    """Get Page Access Token from secrets or env (for Ads, Comments)"""
+    """Get Page Access Token - tries Secret Manager first, then st.secrets"""
+    # 1. Try Google Secret Manager
+    token = get_secret_from_gcp("page-access-token")
+    if token:
+        return token
+    # 2. Fallback to Streamlit secrets
     return st.secrets.get("PAGE_ACCESS_TOKEN", os.getenv("PAGE_ACCESS_TOKEN", ""))
 
 def get_instagram_access_token():
-    """Get Instagram Access Token from secrets or env (for DMs, User Info)"""
+    """Get Instagram Access Token - tries Secret Manager first, then st.secrets"""
+    # 1. Try Google Secret Manager
+    token = get_secret_from_gcp("instagram-access-token")
+    if token:
+        return token
+    # 2. Fallback to Streamlit secrets
     return st.secrets.get("INSTAGRAM_ACCESS_TOKEN", os.getenv("INSTAGRAM_ACCESS_TOKEN", ""))
 
 def get_instagram_user_info(user_id: str) -> dict:
@@ -172,6 +198,72 @@ def load_conversation_messages(conversation_id: str, limit: int = 50) -> list:
     except Exception as e:
         print(f"Error loading messages for {conversation_id}: {e}")
         return []
+
+
+def load_message_content(message_id: str) -> str:
+    """Lädt den Inhalt einer Nachricht (Attachments, Story-Replies) von Instagram"""
+    token = get_instagram_access_token()
+    if not token:
+        return "[Fehler: Kein Token]"
+    
+    try:
+        url = f"https://graph.instagram.com/v21.0/{message_id}"
+        params = {
+            "fields": "id,message,attachments,story",
+            "access_token": token
+        }
+        response = requests.get(url, params=params, timeout=15)
+        
+        if response.status_code == 200:
+            data = response.json()
+            
+            # Prüfe auf Text
+            message = data.get("message", "")
+            if message:
+                return message
+            
+            # Prüfe auf Story-Reply
+            story = data.get("story", {})
+            if story:
+                reply_link = story.get("reply_to", {}).get("link", "")
+                if reply_link:
+                    return f"📸 Story-Antwort: [Story anzeigen]({reply_link})"
+                else:
+                    return "📸 Story-Antwort (Story abgelaufen)"
+            
+            # Prüfe auf Attachments
+            attachments = data.get("attachments", {}).get("data", [])
+            if attachments:
+                att = attachments[0]  # Erstes Attachment
+                
+                # Bild
+                if "image_data" in att:
+                    img_url = att["image_data"].get("url", "")
+                    if img_url:
+                        return f"🖼️ [Bild anzeigen]({img_url})"
+                    return "🖼️ Bild (URL nicht verfügbar)"
+                
+                # Video
+                if "video_data" in att:
+                    video_url = att["video_data"].get("url", "")
+                    if video_url:
+                        return f"🎬 [Video anzeigen]({video_url})"
+                    return "🎬 Video (URL nicht verfügbar)"
+                
+                # Audio
+                if "audio_data" in att:
+                    return "🎤 Sprachnachricht"
+                
+                # Sonstiges
+                return f"📎 Attachment"
+            
+            return "[Inhalt konnte nicht geladen werden]"
+        else:
+            error = response.json().get("error", {}).get("message", "Unbekannter Fehler")
+            return f"[API Fehler: {error[:50]}]"
+            
+    except Exception as e:
+        return f"[Fehler: {str(e)[:30]}]"
 
 
 def sync_conversation_history(sender_id: str, conversation_id: str = None) -> tuple[int, str]:
@@ -1036,6 +1128,45 @@ def update_message(message_id: str, updates: dict):
         return False
 
 
+def bulk_mark_chats_as_read(sender_ids: list):
+    """Markiert mehrere Chats als gelesen (neueste Nachricht jedes Chats)"""
+    if not sender_ids:
+        return
+    
+    client = get_bq_client()
+    user_kuerzel = st.session_state.get('user_kuerzel', 'XX')
+    now = datetime.utcnow().isoformat()
+    
+    # Für jeden Sender die neueste Nachricht als beantwortet markieren
+    sender_list = ", ".join([f"'{s.replace(chr(39), chr(39)+chr(39))}'" for s in sender_ids])
+    
+    query = f"""
+    UPDATE `root-slate-454410-u0.instagram_messages.messages` m
+    SET 
+        response_text = '[Als erledigt markiert]',
+        responded_at = '{now}',
+        responded_by = '{user_kuerzel}'
+    WHERE message_id IN (
+        SELECT message_id FROM (
+            SELECT message_id, 
+                   ROW_NUMBER() OVER (PARTITION BY sender_id ORDER BY timestamp DESC) as rn
+            FROM `root-slate-454410-u0.instagram_messages.messages`
+            WHERE sender_id IN ({sender_list})
+              AND direction = 'incoming'
+        )
+        WHERE rn = 1
+    )
+    AND (response_text IS NULL OR response_text = '')
+    """
+    
+    try:
+        client.query(query).result()
+        load_conversations.clear()
+        load_chat_history.clear()
+    except Exception as e:
+        st.error(f"Fehler beim Bulk-Update: {e}")
+
+
 def render_chat_view(sender_id: str, auto_refresh_chat: bool = False):
     """Rendert die Chat-Ansicht"""
     messages = load_chat_history(sender_id)
@@ -1140,7 +1271,7 @@ def render_chat_view(sender_id: str, auto_refresh_chat: bool = False):
         if st.button("✅ Als beantwortet markieren", key=f"done_{sender_id}"):
             user_kuerzel = st.session_state.get('user_kuerzel', 'XX')
             update_message(last_msg['message_id'], {
-                "response_text": "[Extern beantwortet]",
+                "response_text": "[Als erledigt markiert]",
                 "responded_at": datetime.utcnow().isoformat(),
                 "responded_by": user_kuerzel
             })
@@ -1197,13 +1328,34 @@ def render_chat_view(sender_id: str, auto_refresh_chat: bool = False):
             </div>
             """, unsafe_allow_html=True)
         else:
-            # Leere Nachricht - trotzdem anzeigen mit Hinweis
-            st.markdown(f"""
-            <div class="message-incoming" style="opacity: 0.6;">
-                <div><em>[Nachricht ohne Text]</em></div>
-                <div class="message-time">{time_str}</div>
-            </div>
-            """, unsafe_allow_html=True)
+            # Leere Nachricht - versuche Attachment-Info zu laden
+            msg_id = msg.get('message_id', '')
+            attachment_key = f"attachment_{msg_id}"
+            
+            # Prüfe ob wir schon Attachment-Info haben
+            if attachment_key in st.session_state:
+                att_info = st.session_state[attachment_key]
+                st.markdown(f"""
+                <div class="message-incoming">
+                    <div>{att_info}</div>
+                    <div class="message-time">{time_str}</div>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                # Zeige Platzhalter mit "Laden" Button
+                col_msg, col_btn = st.columns([4, 1])
+                with col_msg:
+                    st.markdown(f"""
+                    <div class="message-incoming" style="opacity: 0.6;">
+                        <div><em>[Medien-Nachricht]</em></div>
+                        <div class="message-time">{time_str}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                with col_btn:
+                    if st.button("👁️", key=f"load_att_{msg_id}", help="Inhalt laden"):
+                        att_info = load_message_content(msg_id)
+                        st.session_state[attachment_key] = att_info
+                        st.rerun()
     
     # "Mehr laden" Button unten (falls es ältere Nachrichten in der DB gibt)
     if end_idx < total_messages:
@@ -1366,6 +1518,10 @@ def main():
             if 'blacklist' not in st.session_state:
                 st.session_state.blacklist = set()
             
+            # Selected Chats für Bulk-Actions
+            if 'selected_chats' not in st.session_state:
+                st.session_state.selected_chats = set()
+            
             # Blacklist anwenden
             if not conversations.empty:
                 conversations = conversations[~conversations['sender_id'].isin(st.session_state.blacklist)]
@@ -1385,6 +1541,36 @@ def main():
                 # Paging Info
                 start_idx = current_page * CHATS_PER_PAGE
                 end_idx = min(start_idx + CHATS_PER_PAGE, total_chats)
+                
+                # === BULK SELECTION MODE ===
+                selection_mode = st.toggle("☑️ Auswahl-Modus", key="bulk_select_mode", help="Mehrere Chats markieren")
+                
+                # Bulk Actions (nur wenn Auswahl-Modus aktiv)
+                if selection_mode and st.session_state.selected_chats:
+                    selected_count = len(st.session_state.selected_chats)
+                    st.markdown(f"**{selected_count} ausgewählt**")
+                    
+                    bulk_col1, bulk_col2, bulk_col3 = st.columns(3)
+                    with bulk_col1:
+                        if st.button("✅ Gelesen", key="bulk_read", help="Als gelesen markieren"):
+                            bulk_mark_chats_as_read(list(st.session_state.selected_chats))
+                            st.session_state.selected_chats = set()
+                            load_conversations.clear()
+                            st.success(f"{selected_count} Chats als gelesen markiert")
+                            st.rerun()
+                    with bulk_col2:
+                        if st.button("🚫 Blacklist", key="bulk_blacklist", help="Auf Blacklist setzen"):
+                            st.session_state.blacklist.update(st.session_state.selected_chats)
+                            st.session_state.selected_chats = set()
+                            st.success(f"{selected_count} User auf Blacklist")
+                            st.rerun()
+                    with bulk_col3:
+                        if st.button("❌ Abbrechen", key="bulk_cancel"):
+                            st.session_state.selected_chats = set()
+                            st.rerun()
+                    
+                    st.divider()
+                
                 st.caption(f"Zeige {start_idx + 1}-{end_idx} von {total_chats}")
                 
                 # Paging Buttons oben
@@ -1425,13 +1611,31 @@ def main():
                         tags_list = [t.strip() for t in tags.split(',') if t.strip()][:2]
                         tags_display = " · ".join(tags_list)
                     
-                    btn_label = f"{icon} **{sender_name}**"
-                    if tags_display:
-                        btn_label += f"\n🏷️ {tags_display}"
-                    
-                    if st.button(btn_label, key=f"conv_{sender_id}", use_container_width=True):
-                        st.session_state.selected_chat = sender_id
-                        st.rerun()
+                    # === SELECTION MODE: Checkbox + Info ===
+                    if selection_mode:
+                        chat_col1, chat_col2 = st.columns([1, 8])
+                        with chat_col1:
+                            is_selected = sender_id in st.session_state.selected_chats
+                            if st.checkbox("", value=is_selected, key=f"sel_{sender_id}", label_visibility="collapsed"):
+                                st.session_state.selected_chats.add(sender_id)
+                            else:
+                                st.session_state.selected_chats.discard(sender_id)
+                        with chat_col2:
+                            btn_label = f"{icon} **{sender_name}**"
+                            if tags_display:
+                                btn_label += f" · 🏷️ {tags_display}"
+                            if st.button(btn_label, key=f"conv_{sender_id}", use_container_width=True):
+                                st.session_state.selected_chat = sender_id
+                                st.rerun()
+                    else:
+                        # === NORMAL MODE: Just button ===
+                        btn_label = f"{icon} **{sender_name}**"
+                        if tags_display:
+                            btn_label += f"\n🏷️ {tags_display}"
+                        
+                        if st.button(btn_label, key=f"conv_{sender_id}", use_container_width=True):
+                            st.session_state.selected_chat = sender_id
+                            st.rerun()
         
         with col_chat:
             if st.session_state.get('selected_chat'):
