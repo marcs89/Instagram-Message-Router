@@ -104,6 +104,27 @@ def get_cached_user_info(user_id: str) -> dict:
     """Cached version of user info lookup via Instagram API"""
     return get_instagram_user_info(user_id)
 
+def save_sender_name_to_db(sender_id: str, sender_name: str):
+    """Speichert den Sender-Namen in BigQuery für alle Nachrichten dieses Senders"""
+    if not sender_name or not sender_id:
+        return
+    try:
+        client = bigquery.Client()
+        query = """
+        UPDATE `root-slate-454410-u0.instagram_messages.messages`
+        SET sender_name = @sender_name
+        WHERE sender_id = @sender_id AND (sender_name IS NULL OR sender_name = '')
+        """
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("sender_name", "STRING", sender_name),
+                bigquery.ScalarQueryParameter("sender_id", "STRING", sender_id),
+            ]
+        )
+        client.query(query, job_config=job_config).result()
+    except Exception as e:
+        print(f"Error saving sender name: {e}")
+
 def get_instagram_account_id():
     """Get Instagram Business Account ID from secrets or env"""
     return st.secrets.get("INSTAGRAM_ACCOUNT_ID", os.getenv("INSTAGRAM_ACCOUNT_ID", ""))
@@ -1292,7 +1313,7 @@ def render_chat_view(sender_id: str, auto_refresh_chat: bool = False):
         st.info("Keine Nachrichten")
         return
     
-    # Username: DB zuerst, dann API falls nötig
+    # Username: DB zuerst, dann API falls nötig (und dann in DB speichern!)
     db_name = messages.iloc[0].get('sender_name', '') or ''
     if db_name:
         sender_name = db_name
@@ -1300,6 +1321,9 @@ def render_chat_view(sender_id: str, auto_refresh_chat: bool = False):
         user_info = get_cached_user_info(sender_id)
         api_username = user_info.get('username', '') or ''
         sender_name = api_username or f"Kunde #{sender_id[-6:]}"
+        # Wenn wir einen Namen von der API haben, in DB speichern (nur einmal nötig!)
+        if api_username:
+            save_sender_name_to_db(sender_id, api_username)
     last_msg = messages.iloc[-1]
     
     # Header with refresh and blacklist buttons
