@@ -222,7 +222,7 @@ def load_instagram_posts(limit: int = 20) -> list:
     return []
 
 def load_post_comments(media_id: str, limit: int = 50) -> list:
-    """Lädt Kommentare eines Posts"""
+    """Lädt Kommentare eines Posts inkl. Replies (um zu prüfen ob wir schon geantwortet haben)"""
     token = get_page_access_token()
     if not token:
         return []
@@ -230,7 +230,7 @@ def load_post_comments(media_id: str, limit: int = 50) -> list:
     try:
         url = f"https://graph.facebook.com/v21.0/{media_id}/comments"
         params = {
-            "fields": "id,text,timestamp,username,from",
+            "fields": "id,text,timestamp,username,from,replies{id,text,timestamp,username,from}",
             "limit": limit,
             "access_token": token
         }
@@ -300,6 +300,9 @@ def ensure_comments_table_schema():
         "ALTER TABLE `root-slate-454410-u0.instagram_messages.ad_comments` ADD COLUMN IF NOT EXISTS post_shortcode STRING",
         "ALTER TABLE `root-slate-454410-u0.instagram_messages.ad_comments` ADD COLUMN IF NOT EXISTS post_type STRING",
         "ALTER TABLE `root-slate-454410-u0.instagram_messages.ad_comments` ADD COLUMN IF NOT EXISTS responded_by STRING",
+        "ALTER TABLE `root-slate-454410-u0.instagram_messages.ad_comments` ADD COLUMN IF NOT EXISTS has_our_reply BOOL",
+        "ALTER TABLE `root-slate-454410-u0.instagram_messages.ad_comments` ADD COLUMN IF NOT EXISTS our_reply_text STRING",
+        "ALTER TABLE `root-slate-454410-u0.instagram_messages.ad_comments` ADD COLUMN IF NOT EXISTS is_done BOOL",
     ]
     
     for query in alter_queries:
@@ -344,6 +347,9 @@ def sync_instagram_comments():
         ad_name = ad_info.get("ad_name", "")[:200]
         post_type = "ad"
         
+        # Eigene Instagram Account ID für Reply-Erkennung
+        own_ig_id = get_instagram_account_id()
+        
         for comment in comments:
             comment_id = comment.get("id", "")
             comment_text = comment.get("text", "")
@@ -354,6 +360,18 @@ def sync_instagram_comments():
             if not comment_id or not comment_text:
                 continue
             
+            # Prüfe ob wir bereits geantwortet haben (in den Replies)
+            has_our_reply = False
+            our_reply_text = ""
+            replies = comment.get("replies", {}).get("data", [])
+            for reply in replies:
+                reply_from_id = reply.get("from", {}).get("id", "")
+                # Prüfe ob Reply von uns ist (eigene IG Account ID)
+                if reply_from_id == own_ig_id:
+                    has_our_reply = True
+                    our_reply_text = reply.get("text", "")[:500]  # Erste Antwort speichern
+                    break
+            
             # Prüfe ob Kommentar bereits existiert
             check_query = f"""
             SELECT comment_id FROM `root-slate-454410-u0.instagram_messages.ad_comments`
@@ -362,6 +380,17 @@ def sync_instagram_comments():
             try:
                 existing = client.query(check_query).to_dataframe()
                 if not existing.empty:
+                    # Update falls Reply-Status sich geändert hat
+                    if has_our_reply:
+                        update_query = f"""
+                        UPDATE `root-slate-454410-u0.instagram_messages.ad_comments`
+                        SET has_our_reply = TRUE, our_reply_text = '{our_reply_text.replace("'", "''")}'
+                        WHERE comment_id = '{comment_id}'
+                        """
+                        try:
+                            client.query(update_query).result()
+                        except:
+                            pass
                     synced_count += 1
                     continue
             except:
@@ -375,7 +404,8 @@ def sync_instagram_comments():
             insert_query = f"""
             INSERT INTO `root-slate-454410-u0.instagram_messages.ad_comments`
             (comment_id, post_id, post_shortcode, post_type, ad_name, commenter_id, commenter_name, 
-             comment_text, created_at, sentiment, status, is_hidden, is_deleted, priority)
+             comment_text, created_at, sentiment, status, is_hidden, is_deleted, priority,
+             has_our_reply, our_reply_text, is_done)
             VALUES (
                 '{comment_id}',
                 '{media_id}',
@@ -390,7 +420,10 @@ def sync_instagram_comments():
                 'new',
                 FALSE,
                 FALSE,
-                '{priority}'
+                '{priority}',
+                {has_our_reply},
+                '{our_reply_text.replace("'", "''")}',
+                FALSE
             )
             """
             try:
@@ -1180,18 +1213,24 @@ Sentiment: {sentiment}
             stats = client.query("""
             SELECT 
                 COUNT(*) as total,
-                COUNTIF((response_text IS NULL OR response_text = '') AND (is_liked IS NULL OR is_liked = FALSE)) as offen,
+                COUNTIF(
+                    (has_our_reply IS NULL OR has_our_reply = FALSE) 
+                    AND (is_done IS NULL OR is_done = FALSE)
+                    AND (response_text IS NULL OR response_text = '')
+                ) as offen,
                 COUNTIF(sentiment = 'negative') as negative,
-                COUNTIF(sentiment = 'question') as questions
+                COUNTIF(sentiment = 'question') as questions,
+                COUNTIF(has_our_reply = TRUE) as bereits_beantwortet
             FROM `root-slate-454410-u0.instagram_messages.ad_comments`
             WHERE is_deleted = FALSE AND post_type = 'ad'
             """).to_dataframe().iloc[0]
             
-            col1, col2, col3, col4 = st.columns(4)
+            col1, col2, col3, col4, col5 = st.columns(5)
             col1.metric("📊 Gesamt", int(stats.get('total', 0) or 0))
             col2.metric("⚠️ Offen", int(stats.get('offen', 0) or 0))
-            col3.metric("🔴 Negativ", int(stats.get('negative', 0) or 0))
-            col4.metric("🟡 Fragen", int(stats.get('questions', 0) or 0))
+            col3.metric("✅ Beantwortet", int(stats.get('bereits_beantwortet', 0) or 0))
+            col4.metric("🔴 Negativ", int(stats.get('negative', 0) or 0))
+            col5.metric("🟡 Fragen", int(stats.get('questions', 0) or 0))
         except:
             pass
         
@@ -1305,7 +1344,10 @@ Sentiment: {sentiment}
             # Filter anwenden - nur Ad-Kommentare
             where_clause = "is_deleted = FALSE AND post_type = 'ad'"
             if comment_filter == "Unbearbeitet":
-                where_clause += " AND (response_text IS NULL OR response_text = '') AND (is_liked IS NULL OR is_liked = FALSE)"
+                # Offen = keine eigene Reply UND nicht als erledigt markiert UND nicht manuell beantwortet
+                where_clause += """ AND (has_our_reply IS NULL OR has_our_reply = FALSE) 
+                                   AND (is_done IS NULL OR is_done = FALSE)
+                                   AND (response_text IS NULL OR response_text = '')"""
             
             comments = client.query(f"""
             SELECT * FROM `root-slate-454410-u0.instagram_messages.ad_comments`
@@ -1320,59 +1362,88 @@ Sentiment: {sentiment}
             if not comments.empty:
                 for idx, comment in comments.iterrows():
                     sentiment = comment.get('sentiment', 'neutral') or 'neutral'
+                    
                     # Safe boolean checks for NA/NaN values
                     response_text = comment.get('response_text')
-                    has_response = pd.notna(response_text) and response_text != ''
-                    liked_val = comment.get('is_liked')
-                    is_liked = pd.notna(liked_val) and liked_val == True
-                    is_processed = has_response or is_liked
+                    has_manual_response = pd.notna(response_text) and response_text != ''
+                    
+                    # Bereits auf Instagram beantwortet?
+                    has_our_reply_val = comment.get('has_our_reply')
+                    has_our_reply = pd.notna(has_our_reply_val) and has_our_reply_val == True
+                    our_reply_text = comment.get('our_reply_text', '') or ''
+                    
+                    # Als erledigt markiert?
+                    is_done_val = comment.get('is_done')
+                    is_done = pd.notna(is_done_val) and is_done_val == True
+                    
+                    # Kommentar ist "bearbeitet" wenn: eigene Reply ODER manuell beantwortet ODER erledigt
+                    is_processed = has_our_reply or has_manual_response or is_done
                     
                     # Icon basierend auf Sentiment
                     sentiment_icon = "🔴" if sentiment == 'negative' else ("🟡" if sentiment == 'question' else "🟢")
                     
                     with st.container():
-                        # Status-Zeile (nur Unbearbeitet-Badge wenn nötig)
-                        if not is_processed:
-                            st.markdown("<span style='background: #FFF3CD; padding: 2px 8px; border-radius: 4px; font-size: 12px;'>⚠️ Unbearbeitet</span>", unsafe_allow_html=True)
+                        # Status-Zeile
+                        status_parts = []
+                        if has_our_reply:
+                            status_parts.append("<span style='background: #D4EDDA; padding: 2px 8px; border-radius: 4px; font-size: 12px;'>✅ Bereits beantwortet</span>")
+                        elif is_done:
+                            status_parts.append("<span style='background: #E2E3E5; padding: 2px 8px; border-radius: 4px; font-size: 12px;'>✓ Erledigt</span>")
+                        elif not is_processed:
+                            status_parts.append("<span style='background: #FFF3CD; padding: 2px 8px; border-radius: 4px; font-size: 12px;'>⚠️ Offen</span>")
                         
-                        col1, col2, col3 = st.columns([4, 1, 1])
+                        if status_parts:
+                            st.markdown(" ".join(status_parts), unsafe_allow_html=True)
+                        
+                        col1, col2, col3, col4 = st.columns([4, 1, 1, 1])
                         
                         with col1:
                             st.markdown(f"**{sentiment_icon} {comment.get('commenter_name', 'Unbekannt')}**")
                             st.write(comment.get('comment_text', ''))
                             
-                            if has_response:
-                                st.caption(f"↳ Eure Antwort: {comment.get('response_text')}")
-                            elif is_liked:
-                                st.caption("❤️ Geliked")
+                            # Zeige bestehende Antwort
+                            if has_our_reply and our_reply_text:
+                                st.caption(f"↳ Eure Antwort (Instagram): {our_reply_text}")
+                            elif has_manual_response:
+                                st.caption(f"↳ Eure Antwort: {response_text}")
                             
-                            # Post-Info (gekürzte Caption)
+                            # Ad-Name
                             ad_name = comment.get('ad_name', '') or ''
                             if ad_name:
                                 short_caption = ad_name[:60] + "..." if len(ad_name) > 60 else ad_name
-                                st.caption(f"📄 {short_caption}")
+                                st.caption(f"📢 {short_caption}")
                         
                         with col2:
-                            # Like Button
-                            if is_liked:
-                                st.write("❤️")
+                            # Antwort-Button (nur wenn noch nicht beantwortet)
+                            if not has_our_reply and not has_manual_response:
+                                if st.button("💬", key=f"reply_c_{idx}", help="Antworten"):
+                                    st.session_state.selected_comment_id = comment['comment_id']
+                                    st.rerun()
                             else:
-                                if st.button("🤍", key=f"like_c_{idx}", help="Kommentar liken"):
+                                st.write("✅")
+                        
+                        with col3:
+                            # Erledigt-Button (nur wenn noch nicht erledigt)
+                            if not is_processed:
+                                if st.button("✓", key=f"done_c_{idx}", help="Als erledigt markieren"):
                                     escaped_id = comment['comment_id'].replace("'", "''")
                                     client.query(f"""
                                     UPDATE `root-slate-454410-u0.instagram_messages.ad_comments`
-                                    SET is_liked = TRUE
+                                    SET is_done = TRUE
                                     WHERE comment_id = '{escaped_id}'
                                     """).result()
                                     st.rerun()
                         
-                        with col3:
-                            if not has_response and not is_liked:
-                                if st.button("💬", key=f"reply_c_{idx}", help="Antworten"):
-                                    st.session_state.selected_comment_id = comment['comment_id']
-                                    st.rerun()
-                            elif has_response:
-                                st.write("✅")
+                        with col4:
+                            # Löschen (verstecken)
+                            if st.button("🗑️", key=f"del_c_{idx}", help="Ausblenden"):
+                                escaped_id = comment['comment_id'].replace("'", "''")
+                                client.query(f"""
+                                UPDATE `root-slate-454410-u0.instagram_messages.ad_comments`
+                                SET is_deleted = TRUE
+                                WHERE comment_id = '{escaped_id}'
+                                """).result()
+                                st.rerun()
                         
                         st.divider()
             else:
