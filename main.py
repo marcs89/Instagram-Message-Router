@@ -355,6 +355,36 @@ def save_to_bigquery(message_data: dict):
         print(f"[BigQuery] Error: {e}")
 
 
+def mark_conversation_responded(customer_id: str):
+    """Markiert die letzte eingehende Nachricht einer Konversation als beantwortet"""
+    if not customer_id or customer_id == "unknown":
+        return
+    from google.cloud import bigquery
+    try:
+        client = bigquery.Client()
+        table_id = "root-slate-454410-u0.instagram_messages.messages"
+        safe_id = customer_id.replace("'", "''")
+        query = f"""
+        UPDATE `{table_id}`
+        SET response_text = '[Via Instagram beantwortet]',
+            responded_at = CURRENT_TIMESTAMP()
+        WHERE message_id IN (
+            SELECT message_id FROM (
+                SELECT message_id, ROW_NUMBER() OVER (ORDER BY received_at DESC) as rn
+                FROM `{table_id}`
+                WHERE sender_id = '{safe_id}'
+                  AND direction = 'incoming'
+                  AND (response_text IS NULL OR response_text = '')
+            ) sub
+            WHERE rn = 1
+        )
+        """
+        client.query(query).result()
+        print(f"[BigQuery] Marked conversation with {customer_id} as responded")
+    except Exception as e:
+        print(f"[BigQuery] Error marking responded: {e}")
+
+
 @functions_framework.http
 def webhook(request: Request):
     """
@@ -420,12 +450,6 @@ def webhook(request: Request):
                 try:
                     processed = process_message(event)
                     
-                    # Echo-Nachrichten (von uns selbst) überspringen
-                    # Diese werden bereits als response_text gespeichert
-                    if processed.get("is_echo") or processed.get("direction") == "outgoing":
-                        print(f"[Skipped] Echo/outgoing message: {processed['message_text'][:30]}...")
-                        continue
-                    
                     # Leere Nachrichten (nur Reaktionen) überspringen
                     if not processed.get("message_text", "").strip():
                         print(f"[Skipped] Empty message (reaction/media without text)")
@@ -436,9 +460,13 @@ def webhook(request: Request):
                     # In BigQuery speichern
                     save_to_bigquery(processed)
                     
+                    # Bei ausgehender Nachricht: Konversation als beantwortet markieren
+                    if processed.get("direction") == "outgoing":
+                        mark_conversation_responded(processed.get("recipient_id", ""))
+                    
                     # Log für Debugging
-                    print(f"[Processed DM] Tags: {processed['tags']} | "
-                          f"Priority: {processed['priority']} | "
+                    direction_icon = "→" if processed.get("direction") == "outgoing" else "←"
+                    print(f"[Processed DM {direction_icon}] Tags: {processed['tags']} | "
                           f"Text: {processed['message_text'][:50]}...")
                     
                 except Exception as e:

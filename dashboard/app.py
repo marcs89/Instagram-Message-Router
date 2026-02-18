@@ -126,6 +126,41 @@ def save_sender_name_to_db(sender_id: str, sender_name: str):
     except Exception as e:
         print(f"Error saving sender name: {e}")
 
+def resolve_missing_usernames(conversations_df):
+    """Resolves missing usernames via Instagram API and saves them to BigQuery.
+    Called after loading conversations to fill in gaps."""
+    if conversations_df.empty:
+        return conversations_df
+    
+    missing = conversations_df[
+        (conversations_df['sender_name'].isna()) | (conversations_df['sender_name'] == '')
+    ]
+    if missing.empty:
+        return conversations_df
+    
+    resolved_any = False
+    for _, row in missing.head(10).iterrows():
+        sender_id = row['sender_id']
+        cache_key = f"_name_resolved_{sender_id}"
+        if cache_key in st.session_state:
+            continue
+        
+        user_info = get_cached_user_info(sender_id)
+        username = user_info.get('username', '')
+        st.session_state[cache_key] = True
+        
+        if username:
+            save_sender_name_to_db(sender_id, username)
+            conversations_df.loc[
+                conversations_df['sender_id'] == sender_id, 'sender_name'
+            ] = username
+            resolved_any = True
+    
+    if resolved_any:
+        load_conversations.clear()
+    
+    return conversations_df
+
 def get_instagram_account_id():
     """Get Instagram Business Account ID from secrets or env"""
     return st.secrets.get("INSTAGRAM_ACCOUNT_ID", os.getenv("INSTAGRAM_ACCOUNT_ID", ""))
@@ -822,7 +857,8 @@ TEAM_MEMBERS = {
     "MS": "Marc",
     "SM": "Sina",
     "JD": "Jessy",
-    "SG": "Sinem"
+    "SG": "Sinem",
+    "KB": "Kea"
 }
 
 # === LOGIN ===
@@ -1012,16 +1048,17 @@ def get_all_tags():
 
 # === BLACKLIST FUNCTIONS (persistent in BigQuery) ===
 @st.cache_data(ttl=60)
-def load_blacklist() -> set:
-    """Lädt die Blacklist aus BigQuery"""
+def load_blacklist() -> dict:
+    """Lädt die Blacklist aus BigQuery (user_id -> username)"""
     client = get_bq_client()
     try:
         df = client.query("""
-            SELECT user_id FROM `root-slate-454410-u0.instagram_messages.blacklist`
+            SELECT user_id, COALESCE(username, '') as username
+            FROM `root-slate-454410-u0.instagram_messages.blacklist`
         """).to_dataframe()
-        return set(df['user_id'].tolist())
+        return dict(zip(df['user_id'], df['username']))
     except:
-        return set()
+        return {}
 
 
 def add_to_blacklist(user_id: str, username: str = "", blocked_by: str = ""):
@@ -1170,6 +1207,16 @@ def load_conversations(filter_type: str = "all", filter_tags_str: str = ""):
         FROM conversation_messages
         WHERE direction = 'incoming' OR direction IS NULL
     ),
+    best_name AS (
+        -- Best available sender_name from INCOMING messages only (avoid picking up our own name)
+        SELECT 
+            customer_id,
+            MAX(sender_name) as sender_name
+        FROM conversation_messages
+        WHERE sender_name IS NOT NULL AND sender_name != ''
+          AND (direction = 'incoming' OR direction IS NULL)
+        GROUP BY customer_id
+    ),
     conversation_stats AS (
         SELECT 
             customer_id,
@@ -1179,15 +1226,16 @@ def load_conversations(filter_type: str = "all", filter_tags_str: str = ""):
     )
     SELECT 
         ac.customer_id as sender_id,
-        COALESCE(li.sender_name, '') as sender_name,
+        COALESCE(bn.sender_name, li.sender_name, '') as sender_name,
         COALESCE(cs.message_count, 0) as message_count,
         la.last_activity_at as last_message_at,
-        CASE WHEN li.response_text IS NULL OR li.response_text = '' THEN 1 ELSE 0 END as has_unanswered,
+        CASE WHEN li.customer_id IS NOT NULL AND (li.response_text IS NULL OR li.response_text = '') THEN 1 ELSE 0 END as has_unanswered,
         COALESCE(li.tags, '') as tags,
         COALESCE(li.message_text, '') as last_message
     FROM all_conversations ac
     JOIN latest_activity la ON ac.customer_id = la.customer_id
     LEFT JOIN latest_incoming li ON ac.customer_id = li.customer_id AND li.rn = 1
+    LEFT JOIN best_name bn ON ac.customer_id = bn.customer_id
     LEFT JOIN conversation_stats cs ON ac.customer_id = cs.customer_id
     WHERE ac.customer_id IS NOT NULL
       AND ac.customer_id != ''
@@ -1197,7 +1245,7 @@ def load_conversations(filter_type: str = "all", filter_tags_str: str = ""):
     
     # Apply filters
     if filter_type == "unbeantwortet":
-        query += " AND (li.response_text IS NULL OR li.response_text = '')"
+        query += " AND li.customer_id IS NOT NULL AND (li.response_text IS NULL OR li.response_text = '')"
     
     if filter_tags_str:
         filter_tags = filter_tags_str.split(",")
@@ -1338,6 +1386,24 @@ def render_chat_view(sender_id: str, auto_refresh_chat: bool = False):
         st.info("Keine Nachrichten")
         return
     
+    # Auto-Sync: Beim ersten Öffnen eines Chats Verlauf von Instagram laden
+    sync_key = f"synced_{sender_id}"
+    if sync_key not in st.session_state:
+        has_outgoing = False
+        if 'direction' in messages.columns:
+            has_outgoing = (messages['direction'] == 'outgoing').any()
+        
+        if not has_outgoing:
+            with st.spinner("Lade Chatverlauf von Instagram..."):
+                count, msg = sync_conversation_history(sender_id)
+                st.session_state[sync_key] = True
+                if count > 0:
+                    load_chat_history.clear()
+                    load_conversations.clear()
+                    messages = load_chat_history(sender_id)
+        else:
+            st.session_state[sync_key] = True
+    
     # Username: DB zuerst, dann API falls nötig (und dann in DB speichern!)
     db_name = messages.iloc[0].get('sender_name', '') or ''
     if db_name:
@@ -1346,7 +1412,6 @@ def render_chat_view(sender_id: str, auto_refresh_chat: bool = False):
         user_info = get_cached_user_info(sender_id)
         api_username = user_info.get('username', '') or ''
         sender_name = api_username or f"Kunde #{sender_id[-6:]}"
-        # Wenn wir einen Namen von der API haben, in DB speichern (nur einmal nötig!)
         if api_username:
             save_sender_name_to_db(sender_id, api_username)
     last_msg = messages.iloc[-1]
@@ -1541,15 +1606,68 @@ def render_chat_view(sender_id: str, auto_refresh_chat: bool = False):
 def main():
     # Header
     # Kompakter Header mit eingeloggtem User
-    col_logo, col_spacer, col_user = st.columns([2, 4, 2])
+    # Stats laden (cached)
+    @st.cache_data(ttl=30)
+    def get_header_stats():
+        client = get_bq_client()
+        own_id = get_own_instagram_id()
+        stats = {"chats": 0, "comments": 0}
+        try:
+            chat_q = client.query(f"""
+            WITH blacklisted AS (
+                SELECT user_id FROM `root-slate-454410-u0.instagram_messages.blacklist`
+            ),
+            latest_per_sender AS (
+                SELECT sender_id, response_text,
+                    ROW_NUMBER() OVER (PARTITION BY sender_id ORDER BY received_at DESC) as rn
+                FROM `root-slate-454410-u0.instagram_messages.messages`
+                WHERE sender_id != '{own_id}'
+                  AND sender_id NOT LIKE 'demo_%' AND sender_id NOT LIKE 'test_%'
+                  AND sender_id NOT IN (SELECT user_id FROM blacklisted)
+            )
+            SELECT COUNT(*) as offen FROM latest_per_sender
+            WHERE rn = 1 AND (response_text IS NULL OR response_text = '')
+            """).to_dataframe().iloc[0]
+            stats["chats"] = int(chat_q['offen'])
+        except:
+            pass
+        try:
+            comment_q = client.query("""
+            SELECT COUNTIF(
+                (has_our_reply IS NULL OR has_our_reply = FALSE)
+                AND (is_done IS NULL OR is_done = FALSE)
+                AND (response_text IS NULL OR response_text = '')
+            ) as offen
+            FROM `root-slate-454410-u0.instagram_messages.ad_comments`
+            WHERE is_deleted = FALSE AND post_type = 'ad'
+            """).to_dataframe().iloc[0]
+            stats["comments"] = int(comment_q['offen'])
+        except:
+            pass
+        return stats
+    
+    header_stats = get_header_stats()
+    
+    col_logo, col_stats, col_user = st.columns([2, 4, 2])
     with col_logo:
         st.markdown("""
         <div style="display: flex; align-items: center; gap: 10px;">
             <img src="https://lilimaus.de/cdn/shop/files/Lilimaus_Logo_241212.png?v=1743081255" height="30">
         </div>
         """, unsafe_allow_html=True)
+    with col_stats:
+        chat_count = header_stats['chats']
+        comment_count = header_stats['comments']
+        chat_badge = f"<span style='background:#dc3545;color:white;padding:2px 8px;border-radius:10px;font-size:13px;font-weight:600;'>{chat_count}</span>" if chat_count > 0 else "<span style='background:#28a745;color:white;padding:2px 8px;border-radius:10px;font-size:13px;'>0</span>"
+        comment_badge = f"<span style='background:#dc3545;color:white;padding:2px 8px;border-radius:10px;font-size:13px;font-weight:600;'>{comment_count}</span>" if comment_count > 0 else "<span style='background:#28a745;color:white;padding:2px 8px;border-radius:10px;font-size:13px;'>0</span>"
+        st.markdown(
+            f"<div style='display:flex;align-items:center;gap:16px;padding-top:4px;'>"
+            f"<span style='font-size:14px;'>💬 Chats offen: {chat_badge}</span>"
+            f"<span style='font-size:14px;'>📢 Kommentare offen: {comment_badge}</span>"
+            f"</div>",
+            unsafe_allow_html=True
+        )
     with col_user:
-        # Zeige eingeloggten User
         user_name = st.session_state.get("user_name", "User")
         user_kuerzel = st.session_state.get("user_kuerzel", "XX")
         
@@ -1568,90 +1686,6 @@ def main():
     
     # ===== TAB 1: Inbox =====
     with tab1:
-        # Sidebar für Filter & Übersicht
-        with st.sidebar:
-            # Übersicht oben
-            st.subheader("Offen")
-            
-            # Cached stats function
-            @st.cache_data(ttl=30)
-            def get_sidebar_stats():
-                client = get_bq_client()
-                own_id = get_own_instagram_id()
-                stats = {"chats": 0, "comments": 0}
-                try:
-                    # Count CONVERSATIONS where the LATEST message is unanswered
-                    chat_stats = client.query(f"""
-                    WITH latest_per_sender AS (
-                        SELECT 
-                            sender_id,
-                            response_text,
-                            ROW_NUMBER() OVER (PARTITION BY sender_id ORDER BY received_at DESC) as rn
-                        FROM `root-slate-454410-u0.instagram_messages.messages`
-                        WHERE sender_id != '{own_id}'
-                          AND sender_id NOT LIKE 'demo_%'
-                          AND sender_id NOT LIKE 'test_%'
-                    )
-                    SELECT COUNT(*) as offen
-                    FROM latest_per_sender
-                    WHERE rn = 1 AND (response_text IS NULL OR response_text = '')
-                    """).to_dataframe().iloc[0]
-                    stats["chats"] = int(chat_stats['offen'])
-                except:
-                    pass
-                try:
-                    comment_stats = client.query("""
-                    SELECT COUNTIF((response_text IS NULL OR response_text = '') AND (is_liked IS NULL OR is_liked = FALSE)) as offen
-                    FROM `root-slate-454410-u0.instagram_messages.ad_comments`
-                    WHERE is_deleted = FALSE
-                    """).to_dataframe().iloc[0]
-                    stats["comments"] = int(comment_stats['offen'])
-                except:
-                    pass
-                return stats
-            
-            sidebar_stats = get_sidebar_stats()
-            st.markdown(f"**Chats:** {sidebar_stats['chats']}")
-            st.markdown(f"**Ad-Kommentare:** {sidebar_stats['comments']}")
-            
-            # Filter
-            st.subheader("🔍 Filter")
-            
-            # Filter: Alle / Unbeantwortet
-            filter_type = st.radio(
-                "Anzeigen",
-                ["Alle", "Unbeantwortet"],
-                key="filter_type",
-                horizontal=True
-            )
-            
-            st.divider()
-            
-            # Filter: Tags (Mehrfachauswahl)
-            all_tags = get_all_tags()
-            filter_tags = st.multiselect(
-                "Nach Tags filtern",
-                options=all_tags,
-                key="filter_tags"
-            )
-            
-            # Blacklist-Verwaltung (persistent aus DB)
-            blacklist = load_blacklist()
-            
-            if blacklist:
-                st.divider()
-                with st.expander(f"🚫 Blockierte User ({len(blacklist)})"):
-                    for blocked_id in list(blacklist):
-                        blocked_name = f"User #{blocked_id[-6:]}"
-                        
-                        col_name, col_unblock = st.columns([3, 1])
-                        with col_name:
-                            st.write(blocked_name)
-                        with col_unblock:
-                            if st.button("✓", key=f"unblock_{blocked_id}", help="Entsperren"):
-                                remove_from_blacklist(blocked_id)
-                                st.rerun()
-        
         # Main Content
         col_inbox, col_chat = st.columns([1, 2])
         
@@ -1665,22 +1699,43 @@ def main():
                     load_chat_history.clear()
                     st.rerun()
             
-            # Konversationen laden (filter_tags als comma-separated string für caching)
+            # Filter inline
+            filter_col1, filter_col2 = st.columns(2)
+            with filter_col1:
+                filter_type = st.radio(
+                    "Anzeigen",
+                    ["Alle", "Unbeantwortet"],
+                    key="filter_type",
+                    horizontal=True,
+                    label_visibility="collapsed"
+                )
+            with filter_col2:
+                all_tags = get_all_tags()
+                filter_tags = st.multiselect(
+                    "Tags",
+                    options=all_tags,
+                    key="filter_tags",
+                    placeholder="Tags filtern...",
+                    label_visibility="collapsed"
+                )
+            
+            # Konversationen laden
             conversations = load_conversations(
                 filter_type="unbeantwortet" if filter_type == "Unbeantwortet" else "all",
                 filter_tags_str=",".join(filter_tags) if filter_tags else ""
             )
             
-            # Blacklist aus DB laden
+            conversations = resolve_missing_usernames(conversations)
+            
+            # Blacklist aus DB laden & anwenden
             blacklist = load_blacklist()
             
             # Selected Chats für Bulk-Actions
             if 'selected_chats' not in st.session_state:
                 st.session_state.selected_chats = set()
             
-            # Blacklist anwenden
             if not conversations.empty and blacklist:
-                conversations = conversations[~conversations['sender_id'].isin(blacklist)]
+                conversations = conversations[~conversations['sender_id'].isin(blacklist.keys())]
             
             # Paging
             CHATS_PER_PAGE = 15
@@ -1701,30 +1756,46 @@ def main():
                 # === BULK SELECTION MODE ===
                 selection_mode = st.toggle("☑️ Auswahl-Modus", key="bulk_select_mode", help="Mehrere Chats markieren")
                 
-                # Bulk Actions (nur wenn Auswahl-Modus aktiv)
+                if selection_mode:
+                    # Schnell-Auswahl Buttons
+                    page_ids = [conversations.iloc[i]['sender_id'] for i in range(start_idx, end_idx)]
+                    all_ids = conversations['sender_id'].tolist()
+                    
+                    sel_col1, sel_col2, sel_col3 = st.columns(3)
+                    with sel_col1:
+                        if st.button(f"☑️ Seite ({len(page_ids)})", key="select_page", help="Alle auf dieser Seite"):
+                            st.session_state.selected_chats.update(page_ids)
+                            st.rerun()
+                    with sel_col2:
+                        if st.button(f"☑️ Alle ({len(all_ids)})", key="select_all", help="Alle Chats auswählen"):
+                            st.session_state.selected_chats.update(all_ids)
+                            st.rerun()
+                    with sel_col3:
+                        if st.button("✖️ Keine", key="select_none"):
+                            st.session_state.selected_chats = set()
+                            st.rerun()
+                
+                # Bulk Actions (wenn Chats ausgewählt)
                 if selection_mode and st.session_state.selected_chats:
                     selected_count = len(st.session_state.selected_chats)
                     st.markdown(f"**{selected_count} ausgewählt**")
                     
-                    bulk_col1, bulk_col2, bulk_col3 = st.columns(3)
+                    bulk_col1, bulk_col2 = st.columns(2)
                     with bulk_col1:
-                        if st.button("✅ Gelesen", key="bulk_read", help="Als gelesen markieren"):
+                        if st.button("✅ Als erledigt markieren", key="bulk_read", type="primary", use_container_width=True):
                             bulk_mark_chats_as_read(list(st.session_state.selected_chats))
                             st.session_state.selected_chats = set()
                             load_conversations.clear()
-                            st.success(f"{selected_count} Chats als gelesen markiert")
+                            st.success(f"{selected_count} Chats als erledigt markiert")
                             st.rerun()
                     with bulk_col2:
-                        if st.button("🚫 Blacklist", key="bulk_blacklist", help="Auf Blacklist setzen"):
+                        if st.button("🚫 Blacklist", key="bulk_blacklist", use_container_width=True):
                             user_kuerzel = st.session_state.get('user_kuerzel', 'XX')
                             for user_id in st.session_state.selected_chats:
-                                add_to_blacklist(user_id, blocked_by=user_kuerzel)
+                                uname = conversations.loc[conversations['sender_id'] == user_id, 'sender_name'].values
+                                add_to_blacklist(user_id, username=uname[0] if len(uname) > 0 else "", blocked_by=user_kuerzel)
                             st.session_state.selected_chats = set()
                             st.success(f"{selected_count} User auf Blacklist")
-                            st.rerun()
-                    with bulk_col3:
-                        if st.button("❌ Abbrechen", key="bulk_cancel"):
-                            st.session_state.selected_chats = set()
                             st.rerun()
                     
                     st.divider()
@@ -1793,6 +1864,19 @@ def main():
                         if st.button(btn_label, key=f"conv_{sender_id}", use_container_width=True):
                             st.session_state.selected_chat = sender_id
                             st.rerun()
+            
+            # Blacklist am Ende der Liste
+            if blacklist:
+                with st.expander(f"🚫 Blockierte User ({len(blacklist)})"):
+                    for blocked_id, blocked_username in blacklist.items():
+                        display_name = blocked_username or f"User #{blocked_id[-6:]}"
+                        bl_col1, bl_col2 = st.columns([3, 1])
+                        with bl_col1:
+                            st.caption(display_name)
+                        with bl_col2:
+                            if st.button("✓", key=f"unblock_{blocked_id}", help="Entsperren"):
+                                remove_from_blacklist(blocked_id)
+                                st.rerun()
         
         with col_chat:
             if st.session_state.get('selected_chat'):
@@ -1959,7 +2043,24 @@ Sentiment: {sentiment}
                         is_liked = pd.notna(comment.get('is_liked')) and comment.get('is_liked') == True
                         
                         with col1:
-                            st.markdown(f"**{sentiment_icon} {comment.get('commenter_name', 'Unbekannt')}**")
+                            # Name + Timestamp
+                            created_at = comment.get('created_at', None)
+                            time_str = ""
+                            if pd.notna(created_at):
+                                try:
+                                    if hasattr(created_at, 'strftime'):
+                                        time_str = created_at.strftime('%d.%m.%Y %H:%M')
+                                    else:
+                                        from datetime import datetime as dt_parse
+                                        parsed = dt_parse.fromisoformat(str(created_at).replace('Z', '+00:00'))
+                                        time_str = parsed.strftime('%d.%m.%Y %H:%M')
+                                except:
+                                    time_str = str(created_at)[:16]
+                            
+                            name_line = f"**{sentiment_icon} {comment.get('commenter_name', 'Unbekannt')}**"
+                            if time_str:
+                                name_line += f"  <span style='color:#888;font-size:12px;font-weight:normal;'>· {time_str}</span>"
+                            st.markdown(name_line, unsafe_allow_html=True)
                             st.write(comment.get('comment_text', ''))
                             
                             # Zeige ALLE Replies
