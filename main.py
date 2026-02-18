@@ -15,16 +15,19 @@ from flask import Request
 # from google.cloud import bigquery
 
 # Environment Variables
-VERIFY_TOKEN = os.environ.get('WEBHOOK_VERIFY_TOKEN', 'lilimaus_webhook_2024_secure')
-APP_SECRET = os.environ.get('META_APP_SECRET', '')
+VERIFY_TOKEN = os.environ.get('WEBHOOK_VERIFY_TOKEN')
+APP_SECRET = os.environ.get('META_APP_SECRET')
 
 
 def verify_signature(payload: bytes, signature: str) -> bool:
     """Verifiziert dass die Anfrage wirklich von Meta kommt"""
     if not APP_SECRET:
-        print("WARNING: APP_SECRET nicht gesetzt, Signatur-Check übersprungen")
-        return True
+        print("[Security] META_APP_SECRET nicht konfiguriert - Anfrage abgelehnt")
+        return False
     
+    if not signature:
+        return False
+
     expected_signature = hmac.new(
         APP_SECRET.encode('utf-8'),
         payload,
@@ -311,6 +314,17 @@ def save_to_bigquery(message_data: dict):
         
         direction = escape(message_data.get("direction", "incoming"))
         
+        # Idempotenz: Prüfe ob Nachricht schon existiert (Webhook-Retries)
+        try:
+            check_result = client.query(f"""
+            SELECT message_id FROM `{table_id}` WHERE message_id = '{msg_id}'
+            """).to_dataframe()
+            if not check_result.empty:
+                print(f"[BigQuery] Message {msg_id} already exists, skipping")
+                return
+        except Exception:
+            pass
+        
         query = f"""
         INSERT INTO `{table_id}`
         (message_id, sender_id, recipient_id, timestamp, received_at, 
@@ -356,13 +370,17 @@ def webhook(request: Request):
         token = request.args.get("hub.verify_token")
         challenge = request.args.get("hub.challenge")
         
-        print(f"[Verification] mode={mode}, token={token}")
+        print(f"[Verification] mode={mode}")
+        
+        if not VERIFY_TOKEN:
+            print("[Verification] FAILED - WEBHOOK_VERIFY_TOKEN nicht konfiguriert")
+            return "Server misconfigured", 500
         
         if mode == "subscribe" and token == VERIFY_TOKEN:
-            print("[Verification] SUCCESS - Token matches")
+            print("[Verification] SUCCESS")
             return challenge, 200
         else:
-            print(f"[Verification] FAILED - Expected token: {VERIFY_TOKEN}")
+            print("[Verification] FAILED - Token mismatch")
             return "Verification failed", 403
     
     # ===== POST: Incoming Messages =====
@@ -380,7 +398,7 @@ def webhook(request: Request):
             print(f"[Error] JSON parsing failed: {e}")
             return "Invalid JSON", 400
         
-        print(f"[Webhook] Received: {json.dumps(payload, indent=2)}")
+        print(f"[Webhook] Received: object={payload.get('object', '?')}, entries={len(payload.get('entry', []))}")
         
         # Object Type prüfen (instagram oder page)
         object_type = payload.get("object", "")

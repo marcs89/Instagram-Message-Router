@@ -26,8 +26,9 @@ for env_path in possible_env_paths:
         load_dotenv(env_path)
         break
 
-if not os.getenv("GEMINI_API_KEY"):
-    os.environ["GEMINI_API_KEY"] = "AIzaSyBCZxnGUJwFJ6j3f4brhV8XrLLUYV9vjHg"
+def _get_gemini_api_key():
+    """GEMINI API Key aus .env oder Streamlit Secrets"""
+    return os.getenv("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", "")
 
 # Google Secret Manager for Token Management
 GCP_PROJECT_ID = "root-slate-454410-u0"
@@ -357,14 +358,15 @@ def sync_conversation_history(sender_id: str, conversation_id: str = None) -> tu
             continue
         
         # Prüfe ob schon existiert
-        check_query = f"""
-        SELECT message_id FROM `root-slate-454410-u0.instagram_messages.messages`
-        WHERE message_id = '{msg_id}'
-        """
         try:
-            existing = client.query(check_query).to_dataframe()
+            existing = client.query(
+                "SELECT message_id FROM `root-slate-454410-u0.instagram_messages.messages` WHERE message_id = @mid",
+                job_config=bigquery.QueryJobConfig(query_parameters=[
+                    bigquery.ScalarQueryParameter("mid", "STRING", msg_id),
+                ])
+            ).to_dataframe()
             if not existing.empty:
-                continue  # Bereits vorhanden
+                continue
         except:
             pass
         
@@ -381,32 +383,28 @@ def sync_conversation_history(sender_id: str, conversation_id: str = None) -> tu
             direction = "incoming"
         
         # In BigQuery speichern
-        insert_query = f"""
-        INSERT INTO `root-slate-454410-u0.instagram_messages.messages`
-        (message_id, sender_id, sender_name, recipient_id, timestamp, received_at, 
-         message_text, has_attachments, attachment_types, is_story_reply, 
-         categories, primary_category, priority, status, tags, direction)
-        VALUES (
-            '{msg_id}',
-            '{actual_sender_id}',
-            '{from_username.replace("'", "''")}',
-            '{actual_recipient_id}',
-            UNIX_SECONDS(TIMESTAMP('{created_time}')),
-            TIMESTAMP('{created_time}'),
-            '{msg_text.replace("'", "''")}',
-            FALSE,
-            '[]',
-            FALSE,
-            '[]',
-            'historie',
-            'normal',
-            'synced',
-            '',
-            '{direction}'
-        )
-        """
+        insert_config = bigquery.QueryJobConfig(query_parameters=[
+            bigquery.ScalarQueryParameter("mid", "STRING", msg_id),
+            bigquery.ScalarQueryParameter("sid", "STRING", actual_sender_id),
+            bigquery.ScalarQueryParameter("sname", "STRING", from_username),
+            bigquery.ScalarQueryParameter("rid", "STRING", actual_recipient_id),
+            bigquery.ScalarQueryParameter("ctime", "STRING", created_time),
+            bigquery.ScalarQueryParameter("mtxt", "STRING", msg_text),
+            bigquery.ScalarQueryParameter("dir", "STRING", direction),
+        ])
         try:
-            client.query(insert_query).result()
+            client.query("""
+            INSERT INTO `root-slate-454410-u0.instagram_messages.messages`
+            (message_id, sender_id, sender_name, recipient_id, timestamp, received_at, 
+             message_text, has_attachments, attachment_types, is_story_reply, 
+             categories, primary_category, priority, status, tags, direction)
+            VALUES (
+                @mid, @sid, @sname, @rid,
+                UNIX_SECONDS(TIMESTAMP(@ctime)), TIMESTAMP(@ctime),
+                @mtxt, FALSE, '[]', FALSE,
+                '[]', 'historie', 'normal', 'synced', '', @dir
+            )
+            """, job_config=insert_config).result()
             new_count += 1
         except Exception as e:
             print(f"Error inserting message {msg_id}: {e}")
@@ -739,23 +737,27 @@ def sync_instagram_comments():
             replies_json = json.dumps(replies_list) if replies_list else ""
             
             # Prüfe ob Kommentar bereits existiert
-            check_query = f"""
-            SELECT comment_id FROM `root-slate-454410-u0.instagram_messages.ad_comments`
-            WHERE comment_id = '{comment_id}'
-            """
             try:
-                existing = client.query(check_query).to_dataframe()
+                existing = client.query(
+                    "SELECT comment_id FROM `root-slate-454410-u0.instagram_messages.ad_comments` WHERE comment_id = @cid",
+                    job_config=bigquery.QueryJobConfig(query_parameters=[
+                        bigquery.ScalarQueryParameter("cid", "STRING", comment_id),
+                    ])
+                ).to_dataframe()
                 if not existing.empty:
                     # Update Replies (immer aktualisieren für neue Antworten)
-                    update_query = f"""
-                    UPDATE `root-slate-454410-u0.instagram_messages.ad_comments`
-                    SET has_our_reply = {has_our_reply}, 
-                        our_reply_text = '{our_reply_text.replace("'", "''")}',
-                        replies_json = '{replies_json.replace("'", "''")}'
-                    WHERE comment_id = '{comment_id}'
-                    """
                     try:
-                        client.query(update_query).result()
+                        client.query(
+                            """UPDATE `root-slate-454410-u0.instagram_messages.ad_comments`
+                            SET has_our_reply = @has_reply, our_reply_text = @reply_txt, replies_json = @rjson
+                            WHERE comment_id = @cid""",
+                            job_config=bigquery.QueryJobConfig(query_parameters=[
+                                bigquery.ScalarQueryParameter("has_reply", "BOOL", has_our_reply),
+                                bigquery.ScalarQueryParameter("reply_txt", "STRING", our_reply_text),
+                                bigquery.ScalarQueryParameter("rjson", "STRING", replies_json),
+                                bigquery.ScalarQueryParameter("cid", "STRING", comment_id),
+                            ])
+                        ).result()
                     except:
                         pass
                     synced_count += 1
@@ -768,34 +770,34 @@ def sync_instagram_comments():
             priority = "high" if sentiment == "negative" else ("medium" if sentiment == "question" else "normal")
             
             # In BigQuery speichern
-            insert_query = f"""
-            INSERT INTO `root-slate-454410-u0.instagram_messages.ad_comments`
-            (comment_id, post_id, post_shortcode, post_type, ad_name, commenter_id, commenter_name, 
-             comment_text, created_at, sentiment, status, is_hidden, is_deleted, priority,
-             has_our_reply, our_reply_text, is_done, replies_json)
-            VALUES (
-                '{comment_id}',
-                '{media_id}',
-                '{shortcode}',
-                '{post_type}',
-                '{ad_name.replace("'", "''")}',
-                '{commenter_id}',
-                '{username.replace("'", "''")}',
-                '{comment_text.replace("'", "''")}',
-                TIMESTAMP('{timestamp}'),
-                '{sentiment}',
-                'new',
-                FALSE,
-                FALSE,
-                '{priority}',
-                {has_our_reply},
-                '{our_reply_text.replace("'", "''")}',
-                FALSE,
-                '{replies_json.replace("'", "''")}'
-            )
-            """
+            insert_config = bigquery.QueryJobConfig(query_parameters=[
+                bigquery.ScalarQueryParameter("cid", "STRING", comment_id),
+                bigquery.ScalarQueryParameter("pid", "STRING", media_id),
+                bigquery.ScalarQueryParameter("sc", "STRING", shortcode),
+                bigquery.ScalarQueryParameter("ptype", "STRING", post_type),
+                bigquery.ScalarQueryParameter("aname", "STRING", ad_name),
+                bigquery.ScalarQueryParameter("comid", "STRING", commenter_id),
+                bigquery.ScalarQueryParameter("uname", "STRING", username),
+                bigquery.ScalarQueryParameter("ctxt", "STRING", comment_text),
+                bigquery.ScalarQueryParameter("ts", "STRING", timestamp),
+                bigquery.ScalarQueryParameter("sent", "STRING", sentiment),
+                bigquery.ScalarQueryParameter("prio", "STRING", priority),
+                bigquery.ScalarQueryParameter("has_reply", "BOOL", has_our_reply),
+                bigquery.ScalarQueryParameter("reply_txt", "STRING", our_reply_text),
+                bigquery.ScalarQueryParameter("rjson", "STRING", replies_json),
+            ])
             try:
-                client.query(insert_query).result()
+                client.query("""
+                INSERT INTO `root-slate-454410-u0.instagram_messages.ad_comments`
+                (comment_id, post_id, post_shortcode, post_type, ad_name, commenter_id, commenter_name, 
+                 comment_text, created_at, sentiment, status, is_hidden, is_deleted, priority,
+                 has_our_reply, our_reply_text, is_done, replies_json)
+                VALUES (
+                    @cid, @pid, @sc, @ptype, @aname, @comid, @uname,
+                    @ctxt, TIMESTAMP(@ts), @sent, 'new', FALSE, FALSE, @prio,
+                    @has_reply, @reply_txt, FALSE, @rjson
+                )
+                """, job_config=insert_config).result()
                 new_count += 1
             except Exception as e:
                 print(f"Error inserting comment {comment_id}: {e}")
@@ -1025,17 +1027,17 @@ def load_blacklist() -> set:
 def add_to_blacklist(user_id: str, username: str = "", blocked_by: str = ""):
     """Fügt einen User zur Blacklist hinzu"""
     client = get_bq_client()
-    escaped_id = user_id.replace("'", "''")
-    escaped_name = username.replace("'", "''") if username else ""
-    escaped_by = blocked_by.replace("'", "''") if blocked_by else ""
-    
     try:
-        client.query(f"""
-            INSERT INTO `root-slate-454410-u0.instagram_messages.blacklist`
-            (user_id, username, blocked_by)
-            VALUES ('{escaped_id}', '{escaped_name}', '{escaped_by}')
-        """).result()
-        load_blacklist.clear()  # Cache leeren
+        client.query(
+            """INSERT INTO `root-slate-454410-u0.instagram_messages.blacklist`
+            (user_id, username, blocked_by) VALUES (@uid, @uname, @by)""",
+            job_config=bigquery.QueryJobConfig(query_parameters=[
+                bigquery.ScalarQueryParameter("uid", "STRING", user_id),
+                bigquery.ScalarQueryParameter("uname", "STRING", username or ""),
+                bigquery.ScalarQueryParameter("by", "STRING", blocked_by or ""),
+            ])
+        ).result()
+        load_blacklist.clear()
         return True
     except:
         return False
@@ -1044,14 +1046,14 @@ def add_to_blacklist(user_id: str, username: str = "", blocked_by: str = ""):
 def remove_from_blacklist(user_id: str):
     """Entfernt einen User von der Blacklist"""
     client = get_bq_client()
-    escaped_id = user_id.replace("'", "''")
-    
     try:
-        client.query(f"""
-            DELETE FROM `root-slate-454410-u0.instagram_messages.blacklist`
-            WHERE user_id = '{escaped_id}'
-        """).result()
-        load_blacklist.clear()  # Cache leeren
+        client.query(
+            "DELETE FROM `root-slate-454410-u0.instagram_messages.blacklist` WHERE user_id = @uid",
+            job_config=bigquery.QueryJobConfig(query_parameters=[
+                bigquery.ScalarQueryParameter("uid", "STRING", user_id),
+            ])
+        ).result()
+        load_blacklist.clear()
         return True
     except:
         return False
@@ -1078,7 +1080,7 @@ Schreibe eine kurze Chat-Antwort (max 2-3 Sätze).
 
 def generate_ai_reply(message_text: str, sender_name: str, history: str = ""):
     """Generiert einen Antwortvorschlag mittels Google Gemini"""
-    api_key = os.getenv("GEMINI_API_KEY")
+    api_key = _get_gemini_api_key()
     if not api_key:
         return "Hey! Danke für deine Nachricht 😊"
     
@@ -1195,13 +1197,13 @@ def load_conversations(filter_type: str = "all", filter_tags_str: str = ""):
     
     # Apply filters
     if filter_type == "unbeantwortet":
-        query += " AND (lm.response_text IS NULL OR lm.response_text = '')"
+        query += " AND (li.response_text IS NULL OR li.response_text = '')"
     
     if filter_tags_str:
         filter_tags = filter_tags_str.split(",")
         tag_conditions = []
         for tag in filter_tags:
-            tag_conditions.append(f"lm.tags LIKE '%{tag}%'")
+            tag_conditions.append(f"li.tags LIKE '%{tag}%'")
         query += f" AND ({' OR '.join(tag_conditions)})"
     
     query += """
@@ -1221,43 +1223,63 @@ def load_conversations(filter_type: str = "all", filter_tags_str: str = ""):
 def load_chat_history(sender_id: str):
     """Lädt den Chat-Verlauf für einen Sender (eingehend + ausgehend)"""
     client = get_bq_client()
-    # Lade sowohl eingehende (sender_id = kunde) als auch ausgehende (recipient_id = kunde) Nachrichten
-    query = f"""
+    query = """
     SELECT *
     FROM `root-slate-454410-u0.instagram_messages.messages`
-    WHERE sender_id = '{sender_id}' 
-       OR recipient_id = '{sender_id}'
+    WHERE sender_id = @sender_id 
+       OR recipient_id = @sender_id
     ORDER BY received_at ASC
     """
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("sender_id", "STRING", sender_id),
+        ]
+    )
     try:
-        return client.query(query).to_dataframe()
+        return client.query(query, job_config=job_config).to_dataframe()
     except:
         return pd.DataFrame()
 
+
+ALLOWED_UPDATE_COLUMNS = {
+    "response_text", "responded_at", "responded_by", "tags",
+    "priority", "status", "sender_name", "direction"
+}
 
 def update_message(message_id: str, updates: dict):
     """Aktualisiert eine Nachricht und leert den Cache"""
     client = get_bq_client()
     
+    query_params = [
+        bigquery.ScalarQueryParameter("message_id", "STRING", message_id),
+    ]
     set_clauses = []
-    for key, value in updates.items():
+    for i, (key, value) in enumerate(updates.items()):
+        if key not in ALLOWED_UPDATE_COLUMNS:
+            st.error(f"Ungültige Spalte: {key}")
+            return False
+        param_name = f"p_{i}"
         if value is None:
             set_clauses.append(f"{key} = NULL")
         elif isinstance(value, str):
-            escaped = value.replace("'", "''")
-            set_clauses.append(f"{key} = '{escaped}'")
+            set_clauses.append(f"{key} = @{param_name}")
+            query_params.append(bigquery.ScalarQueryParameter(param_name, "STRING", value))
+        elif isinstance(value, bool):
+            set_clauses.append(f"{key} = @{param_name}")
+            query_params.append(bigquery.ScalarQueryParameter(param_name, "BOOL", value))
         else:
-            set_clauses.append(f"{key} = {value}")
+            set_clauses.append(f"{key} = @{param_name}")
+            query_params.append(bigquery.ScalarQueryParameter(param_name, "FLOAT64" if isinstance(value, float) else "INT64", value))
     
     query = f"""
     UPDATE `root-slate-454410-u0.instagram_messages.messages`
     SET {", ".join(set_clauses)}
-    WHERE message_id = '{message_id.replace("'", "''")}'
+    WHERE message_id = @message_id
     """
+    job_config = bigquery.QueryJobConfig(query_parameters=query_params)
     
     try:
-        client.query(query).result()
-        # Clear cache after update
+        client.query(query, job_config=job_config).result()
         load_conversations.clear()
         load_chat_history.clear()
         return True
@@ -1275,21 +1297,18 @@ def bulk_mark_chats_as_read(sender_ids: list):
     user_kuerzel = st.session_state.get('user_kuerzel', 'XX')
     now = datetime.utcnow().isoformat()
     
-    # Für jeden Sender die neueste Nachricht als beantwortet markieren
-    sender_list = ", ".join([f"'{s.replace(chr(39), chr(39)+chr(39))}'" for s in sender_ids])
-    
-    query = f"""
+    query = """
     UPDATE `root-slate-454410-u0.instagram_messages.messages` m
     SET 
         response_text = '[Als erledigt markiert]',
-        responded_at = '{now}',
-        responded_by = '{user_kuerzel}'
+        responded_at = @now,
+        responded_by = @by
     WHERE message_id IN (
         SELECT message_id FROM (
             SELECT message_id, 
                    ROW_NUMBER() OVER (PARTITION BY sender_id ORDER BY timestamp DESC) as rn
             FROM `root-slate-454410-u0.instagram_messages.messages`
-            WHERE sender_id IN ({sender_list})
+            WHERE sender_id IN UNNEST(@sender_ids)
               AND direction = 'incoming'
         )
         WHERE rn = 1
@@ -1297,8 +1316,14 @@ def bulk_mark_chats_as_read(sender_ids: list):
     AND (response_text IS NULL OR response_text = '')
     """
     
+    job_config = bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter("now", "STRING", now),
+        bigquery.ScalarQueryParameter("by", "STRING", user_kuerzel),
+        bigquery.ArrayQueryParameter("sender_ids", "STRING", sender_ids),
+    ])
+    
     try:
-        client.query(query).result()
+        client.query(query, job_config=job_config).result()
         load_conversations.clear()
         load_chat_history.clear()
     except Exception as e:
@@ -1810,7 +1835,7 @@ def main():
         
         # Funktion für KI-Antwort
         def generate_comment_reply(comment_text: str, sentiment: str, commenter_name: str) -> str:
-            api_key = os.getenv("GEMINI_API_KEY")
+            api_key = _get_gemini_api_key()
             if not api_key:
                 return "Danke für deinen Kommentar! 🤍"
             try:
@@ -1980,12 +2005,12 @@ Sentiment: {sentiment}
                             # Erledigt-Button (nur wenn noch nicht erledigt)
                             if not is_processed:
                                 if st.button("✓ Erledigt", key=f"done_c_{idx}"):
-                                    escaped_id = comment['comment_id'].replace("'", "''")
-                                    client.query(f"""
-                                    UPDATE `root-slate-454410-u0.instagram_messages.ad_comments`
-                                    SET is_done = TRUE
-                                    WHERE comment_id = '{escaped_id}'
-                                    """).result()
+                                    client.query(
+                                        "UPDATE `root-slate-454410-u0.instagram_messages.ad_comments` SET is_done = TRUE WHERE comment_id = @cid",
+                                        job_config=bigquery.QueryJobConfig(query_parameters=[
+                                            bigquery.ScalarQueryParameter("cid", "STRING", comment['comment_id'])
+                                        ])
+                                    ).result()
                                     st.rerun()
                         
                         with col4:
@@ -1995,12 +2020,12 @@ Sentiment: {sentiment}
                         with col5:
                             # Ausblenden (nur im Dashboard, nicht bei Meta!)
                             if st.button("👁️", key=f"hide_c_{idx}", help="Nur im Dashboard ausblenden"):
-                                escaped_id = comment['comment_id'].replace("'", "''")
-                                client.query(f"""
-                                UPDATE `root-slate-454410-u0.instagram_messages.ad_comments`
-                                SET is_deleted = TRUE
-                                WHERE comment_id = '{escaped_id}'
-                                """).result()
+                                client.query(
+                                    "UPDATE `root-slate-454410-u0.instagram_messages.ad_comments` SET is_deleted = TRUE WHERE comment_id = @cid",
+                                    job_config=bigquery.QueryJobConfig(query_parameters=[
+                                        bigquery.ScalarQueryParameter("cid", "STRING", comment['comment_id'])
+                                    ])
+                                ).result()
                                 st.rerun()
                         
                         # === INLINE ANTWORT-DIALOG (direkt unter diesem Kommentar) ===
@@ -2031,18 +2056,18 @@ Sentiment: {sentiment}
                                 if st.button("📤 Senden", type="primary", key=f"send_{idx}"):
                                     success, msg = reply_to_comment(current_comment_id, reply_text)
                                     if success:
-                                        escaped_reply = reply_text.replace("'", "''")
-                                        escaped_id = current_comment_id.replace("'", "''")
                                         user_kuerzel = st.session_state.get('user_kuerzel', 'XX')
-                                        client.query(f"""
-                                        UPDATE `root-slate-454410-u0.instagram_messages.ad_comments`
-                                        SET response_text = '{escaped_reply}', 
-                                            responded_at = CURRENT_TIMESTAMP(),
-                                            responded_by = '{user_kuerzel}',
-                                            has_our_reply = TRUE,
-                                            our_reply_text = '{escaped_reply}'
-                                        WHERE comment_id = '{escaped_id}'
-                                        """).result()
+                                        client.query(
+                                            """UPDATE `root-slate-454410-u0.instagram_messages.ad_comments`
+                                            SET response_text = @reply, responded_at = CURRENT_TIMESTAMP(),
+                                                responded_by = @by, has_our_reply = TRUE, our_reply_text = @reply
+                                            WHERE comment_id = @cid""",
+                                            job_config=bigquery.QueryJobConfig(query_parameters=[
+                                                bigquery.ScalarQueryParameter("reply", "STRING", reply_text),
+                                                bigquery.ScalarQueryParameter("by", "STRING", user_kuerzel),
+                                                bigquery.ScalarQueryParameter("cid", "STRING", current_comment_id),
+                                            ])
+                                        ).result()
                                         st.success(f"✅ Gesendet!")
                                         st.session_state.selected_comment_id = None
                                         if reply_key in st.session_state:
@@ -2053,16 +2078,18 @@ Sentiment: {sentiment}
                             
                             with btn_col2:
                                 if st.button("💾 Speichern", key=f"save_{idx}"):
-                                    escaped_reply = reply_text.replace("'", "''")
-                                    escaped_id = current_comment_id.replace("'", "''")
                                     user_kuerzel = st.session_state.get('user_kuerzel', 'XX')
-                                    client.query(f"""
-                                    UPDATE `root-slate-454410-u0.instagram_messages.ad_comments`
-                                    SET response_text = '{escaped_reply}', 
-                                        responded_at = CURRENT_TIMESTAMP(),
-                                        responded_by = '{user_kuerzel}'
-                                    WHERE comment_id = '{escaped_id}'
-                                    """).result()
+                                    client.query(
+                                        """UPDATE `root-slate-454410-u0.instagram_messages.ad_comments`
+                                        SET response_text = @reply, responded_at = CURRENT_TIMESTAMP(),
+                                            responded_by = @by
+                                        WHERE comment_id = @cid""",
+                                        job_config=bigquery.QueryJobConfig(query_parameters=[
+                                            bigquery.ScalarQueryParameter("reply", "STRING", reply_text),
+                                            bigquery.ScalarQueryParameter("by", "STRING", user_kuerzel),
+                                            bigquery.ScalarQueryParameter("cid", "STRING", current_comment_id),
+                                        ])
+                                    ).result()
                                     st.success("✅ Gespeichert")
                                     st.session_state.selected_comment_id = None
                                     if reply_key in st.session_state:

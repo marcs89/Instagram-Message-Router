@@ -1,128 +1,104 @@
 # Instagram Message Router
 
-Tool zum automatischen Kategorisieren und Routen von Instagram DMs an die richtigen Mitarbeiter.
+Tool zum automatischen Kategorisieren und Routen von Instagram DMs und Ad-Kommentaren.
 
 ## Features
 
-- 📥 Empfängt Instagram DMs via Webhook
-- 🏷️ Automatische Kategorisierung (Größenberatung, Kooperation, Support, etc.)
-- 👥 Zuweisung an Mitarbeiter nach Kategorie
-- 📊 Dashboard mit Filtern und Status-Tracking
-- ⚡ Schnellantworten via Templates
+- Empfängt Instagram DMs via Webhook (Cloud Run / Cloud Function)
+- Automatische Kategorisierung (Kundenservice, Kooperation, Feedback)
+- Ad-Kommentare synchronisieren und beantworten
+- KI-Antwortvorschläge (Google Gemini)
+- Streamlit-Dashboard mit Login, Filtern, Chat-Ansicht
+- Blacklist-Verwaltung (persistent in BigQuery)
 
-## Setup-Status
-
-- [ ] Meta Developer App erstellt
-- [ ] Instagram Business Account verknüpft
-- [ ] App Review eingereicht
-- [ ] App Review genehmigt
-- [ ] Backend deployed
-- [ ] Dashboard live
-
----
-
-## Phase 1: Meta App Setup (JETZT)
-
-### Schritt 1: Meta Developer Account
-
-1. Gehe zu: https://developers.facebook.com/
-2. Klicke "Erste Schritte" oder "Log In" (mit eurem Business Facebook Account)
-3. Akzeptiere die Nutzungsbedingungen
-
-### Schritt 2: Neue App erstellen
-
-1. Klicke "Meine Apps" → "App erstellen"
-2. Wähle **"Anderer"** als Use Case (oder "Business" wenn verfügbar)
-3. Wähle App-Typ: **"Business"**
-4. App-Details:
-   - **App-Name:** `[Firmenname] Instagram Router` (z.B. "ACME Instagram Router")
-   - **Kontakt-E-Mail:** Eure Business-E-Mail
-   - **Business Portfolio:** Euer Meta Business Account auswählen
-5. Klicke "App erstellen"
-
-### Schritt 3: Instagram Messaging aktivieren
-
-1. In der App-Übersicht: Suche nach **"Instagram"** in den Produkten
-2. Klicke bei **"Instagram Basic Display"** NICHT auf Einrichten
-3. Suche stattdessen nach **"Messenger"** → "Einrichten"
-4. Unter "Instagram" → "Instagram-Nachrichten-API" aktivieren
-
-### Schritt 4: Instagram Business Account verbinden
-
-1. Gehe zu "Instagram" → "Instagram-Konten"
-2. Klicke "Konto hinzufügen"
-3. Verbinde euren Instagram Business Account
-4. **Wichtig:** Der Instagram Account muss:
-   - Ein Business oder Creator Account sein (kein privater)
-   - Mit einer Facebook Page verknüpft sein
-
-### Schritt 5: Berechtigungen konfigurieren
-
-Unter "App-Einstellungen" → "Berechtigungen" benötigt ihr:
-
-| Permission | Zweck |
-|------------|-------|
-| `instagram_basic` | Basis-Zugriff |
-| `instagram_manage_messages` | Nachrichten lesen/senden |
-| `pages_messaging` | Messenger-Zugriff |
-| `pages_manage_metadata` | Webhook-Subscriptions |
-
-### Schritt 6: App Review einreichen
-
-1. Gehe zu "App-Prüfung" → "Berechtigungen und Features"
-2. Für jede Permission:
-   - Klicke "Anfordern"
-   - Beschreibe den Use Case (siehe unten)
-   - Lade ggf. Screenshots hoch
-3. Reiche die App zur Prüfung ein
-
-**Use Case Beschreibung (Copy-Paste Vorlage):**
-
-```
-Wir sind ein E-Commerce Unternehmen und erhalten täglich Kundenanfragen 
-via Instagram Direct Messages. Diese Nachrichten umfassen:
-- Produktfragen (Größenberatung, Verfügbarkeit)
-- Kundenservice-Anfragen
-- Feedback und Bewertungen
-
-Unser Tool soll:
-1. Eingehende Nachrichten automatisch kategorisieren
-2. Nachrichten an den zuständigen Mitarbeiter weiterleiten
-3. Antworten über ein zentrales Dashboard ermöglichen
-
-Dies verbessert unsere Antwortzeiten und Kundenzufriedenheit.
-```
-
----
-
-## Phase 2: Backend (nach App-Erstellung)
-
-Wird im nächsten Schritt angelegt:
-- `webhook.py` - Cloud Function für eingehende Nachrichten
-- `categorizer.py` - Kategorisierungslogik
-- `bigquery_client.py` - Datenbank-Verbindung
-
----
-
-## Phase 3: Dashboard (nach Backend)
-
-- Streamlit-basiertes Dashboard
-- Filter nach Kategorie, Status, Mitarbeiter
-- Schnellantwort-Templates
-
----
-
-## Dateien
+## Architektur
 
 ```
 Instagram-Message-Router/
-├── README.md              # Diese Datei
-├── env_template.txt       # Umgebungsvariablen Template
-├── requirements.txt       # Python Dependencies
-├── webhook.py            # Cloud Function Entry Point
-├── categorizer.py        # Nachricht → Kategorie
-├── bigquery_client.py    # DB Queries
-├── message_sender.py     # Antworten senden
-└── dashboard/
-    └── app.py            # Streamlit Dashboard
+├── main.py                           # Webhook Handler (Cloud Run)
+├── refresh_tokens.py                 # Token-Refresh Script (manuell)
+├── requirements.txt                  # Dependencies: Webhook
+├── Dockerfile                        # Cloud Run Container
+├── deploy.sh                         # Deploy-Script (liest Secrets aus Env)
+├── env_template.txt                  # Env-Template (KEINE echten Werte!)
+├── .env                              # Lokale Secrets (NICHT committen!)
+├── .gitignore
+├── dashboard/
+│   ├── app.py                        # Streamlit Dashboard
+│   ├── requirements.txt              # Dependencies: Dashboard
+│   └── .streamlit/
+│       ├── config.toml               # Streamlit Config
+│       └── secrets.toml              # Streamlit Secrets (NICHT committen!)
+└── cloud_functions/
+    └── token_refresh/
+        ├── main.py                   # Cloud Function: Token Refresh
+        └── requirements.txt          # Dependencies: Token Refresh
 ```
+
+## Komponenten
+
+### 1. Webhook (`main.py`)
+- Empfängt POST-Events von Meta (Instagram DMs + Ad-Kommentare)
+- Signaturprüfung (fail-closed: ohne APP_SECRET wird alles abgelehnt)
+- Auto-Tagging nach Keywords
+- Idempotente Speicherung in BigQuery (kein Duplikat bei Webhook-Retries)
+- Deployed als Cloud Run Service oder Cloud Function
+
+### 2. Dashboard (`dashboard/app.py`)
+- Streamlit-App mit Multi-User Login
+- Inbox: Chat-Verlauf mit Antwort-Funktion
+- Ad-Kommentare: Sync von Instagram, Antworten, Sentiment-Analyse
+- KI-Vorschläge via Google Gemini
+- Alle DB-Queries parameterisiert (kein SQL-Injection-Risiko)
+
+### 3. Token Refresh (`refresh_tokens.py` + `cloud_functions/token_refresh/`)
+- Erneuert Instagram Access Token via Meta API
+- Speichert neuen Token in Google Secret Manager
+- Kann manuell oder via Cloud Scheduler ausgeführt werden
+
+## Setup
+
+### Voraussetzungen
+- Google Cloud Projekt mit BigQuery + Secret Manager
+- Meta Developer App mit Instagram Messaging Permissions
+- Python 3.12+
+
+### 1. Secrets konfigurieren
+
+Alle Secrets werden über **Environment-Variablen** (lokal via `.env`) oder **Google Secret Manager** (Produktion) bereitgestellt.
+
+Kopiere `env_template.txt` nach `.env` und fülle die Werte aus:
+```bash
+cp env_template.txt .env
+# Dann .env editieren und echte Werte eintragen
+```
+
+### 2. Webhook deployen
+```bash
+# Secrets aus Secret Manager laden
+export WEBHOOK_VERIFY_TOKEN=$(gcloud secrets versions access latest --secret=webhook-verify-token)
+export META_APP_SECRET=$(gcloud secrets versions access latest --secret=meta-app-secret)
+
+# Deploy
+./deploy.sh
+```
+
+### 3. Dashboard starten
+```bash
+cd dashboard
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+## BigQuery Tabellen
+
+- `instagram_messages.messages` - DM-Nachrichten
+- `instagram_messages.ad_comments` - Ad-Kommentare
+- `instagram_messages.blacklist` - Blockierte User
+
+## Sicherheit
+
+- Webhook-Signaturprüfung ist **fail-closed** (ohne `META_APP_SECRET` werden alle Anfragen abgelehnt)
+- Keine Secrets im Code oder in Templates
+- Alle BigQuery-Queries nutzen parameterisierte Parameter (kein String-Escaping)
+- Sensitive Daten werden nicht in Logs geschrieben
