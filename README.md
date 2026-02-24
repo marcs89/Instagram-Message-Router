@@ -18,21 +18,25 @@ Tool zum automatischen Kategorisieren und Routen von Instagram DMs und Ad-Kommen
 
 ```
 Instagram-Message-Router/
-├── main.py                           # Webhook Handler (Cloud Run)
+├── main.py                           # Webhook Handler (Cloud Function)
 ├── refresh_tokens.py                 # Token-Refresh Script (manuell)
 ├── requirements.txt                  # Dependencies: Webhook
-├── Dockerfile                        # Cloud Run Container
-├── deploy.sh                         # Deploy-Script (liest Secrets aus Env)
+├── Dockerfile                        # Cloud Function Container
+├── deploy.sh                         # Deploy-Script: Webhook
 ├── env_template.txt                  # Env-Template (KEINE echten Werte!)
 ├── .env                              # Lokale Secrets (NICHT committen!)
 ├── ANLEITUNG.md                      # Anwender-Dokumentation
 ├── .gitignore
 ├── dashboard/
 │   ├── app.py                        # Streamlit Dashboard
+│   ├── Dockerfile                    # Cloud Run Container
+│   ├── entrypoint.sh                 # Startup: Secrets laden + Streamlit starten
+│   ├── deploy.sh                     # Deploy-Script: Dashboard (Cloud Run)
+│   ├── .dockerignore                 # Schützt secrets.toml vor Docker-Build
 │   ├── requirements.txt              # Dependencies: Dashboard
 │   └── .streamlit/
-│       ├── config.toml               # Streamlit Config
-│       └── secrets.toml              # Streamlit Secrets (NICHT committen!)
+│       ├── config.toml               # Streamlit Config (Theme)
+│       └── secrets.toml              # Lokale Secrets (NICHT committen!)
 └── cloud_functions/
     └── token_refresh/
         ├── main.py                   # Cloud Function: Token Refresh
@@ -58,11 +62,15 @@ Instagram-Message-Router/
 - **Header-Stats:** Offene Chats + offene Kommentare als Badges neben Logo
 - Automatische Username-Auflösung (bis zu 10 pro Seitenaufruf, persistent in DB)
 - Alle DB-Queries parameterisiert (kein SQL-Injection-Risiko)
+- Deployed als Cloud Run Service (`instagram-dashboard`, europe-west1)
+- Service Account `streamlit-dashboard@...` für BigQuery + Secret Manager Zugriff
+- Secrets werden aus Google Secret Manager gemountet (`dashboard-secrets`)
 
-### 3. Token Refresh (`refresh_tokens.py` + `cloud_functions/token_refresh/`)
-- Erneuert Instagram Access Token via Meta API
+### 3. Token Refresh (`cloud_functions/token_refresh/`)
+- Erneuert Instagram Access Token via Meta API (Token läuft nach 60 Tagen ab)
 - Speichert neuen Token in Google Secret Manager
-- Kann manuell oder via Cloud Scheduler ausgeführt werden
+- Deployed als Cloud Function (`instagram-token-refresh`)
+- **Automatisch via Cloud Scheduler** (`instagram-token-refresh-monthly`, am 1. jeden Monats um 03:00)
 
 ## Setup
 
@@ -96,14 +104,25 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-### 4. Dashboard deployen (Streamlit Cloud)
+### 4. Dashboard deployen (Cloud Run)
 
-Wir haben ein bestehendes **Streamlit Community Cloud** Konto. Deployment:
+Das Dashboard läuft permanent auf Google Cloud Run. Re-Deployment nach Code-Änderungen:
 
-1. Code nach GitHub pushen
-2. In Streamlit Cloud die App verbinden (Repo + Branch + Pfad `Tools/Instagram-Message-Router/dashboard/app.py`)
-3. Secrets in den Streamlit Cloud Settings hinterlegen (gleicher Inhalt wie `secrets.toml`)
-4. App ist dann unter der Streamlit Cloud URL erreichbar
+```bash
+cd dashboard
+./deploy.sh
+```
+
+**Produktions-URL:** https://instagram-dashboard-309571657642.europe-west1.run.app
+
+Die Dashboard-Secrets (User-Passwörter, API Keys) liegen im Google Secret Manager unter `dashboard-secrets`. Bei Passwort-Änderungen:
+
+```bash
+# secrets.toml lokal bearbeiten, dann hochladen:
+gcloud secrets versions add dashboard-secrets --data-file=.streamlit/secrets.toml --project=root-slate-454410-u0
+# Danach Re-Deploy damit die neue Version geladen wird:
+./deploy.sh
+```
 
 ## BigQuery Tabellen
 
